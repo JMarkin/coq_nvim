@@ -89,7 +89,7 @@ def _launch_loop(nvim: Nvim, stack: Stack) -> None:
                                 nvim,
                                 lambda: complete(nvim, stack=stack, col=col, comps=()),
                             )
-                            if stack.settings.display.pum.fast_close
+                            if stack.settings.display.pum.fast_close and s.pum_location is None
                             else sleep(0),
                         )
                         s = state()
