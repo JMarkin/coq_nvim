@@ -12,9 +12,11 @@ from typing import (
 )
 from uuid import UUID, uuid4
 
+from ...shared.fuzzy import multi_set_ratio
 from ...shared.parse import coalesce
 from ...shared.repeat import sanitize
 from ...shared.runtime import Supervisor
+from ...shared.settings import MatchOptions
 from ...shared.timeit import timeit
 from ...shared.types import Completion, Context
 from .database import Database
@@ -26,17 +28,20 @@ class _CacheCtx:
     commit_id: UUID
     buf_id: int
     row: int
-    text_before: str
+    syms_before: str
 
 
-def _use_cache(cache: _CacheCtx, ctx: Context) -> bool:
+def _use_cache(match: MatchOptions, cache: _CacheCtx, ctx: Context) -> bool:
     row, _ = ctx.position
     use_cache = (
         not ctx.manual
         and cache.commit_id == ctx.commit_id
         and ctx.buf_id == cache.buf_id
         and row == cache.row
-        and ctx.syms_before.startswith(cache.text_before)
+        and multi_set_ratio(
+            ctx.syms_before, cache.syms_before, look_ahead=match.look_ahead
+        )
+        >= match.fuzzy_cutoff
     )
     return use_cache
 
@@ -61,7 +66,7 @@ class CacheWorker:
             commit_id=uuid4(),
             buf_id=-1,
             row=-1,
-            text_before="",
+            syms_before="",
         )
         self._clients: MutableSet[str] = set()
         self._cached: MutableMapping[bytes, Completion] = {}
@@ -71,7 +76,7 @@ class CacheWorker:
     ) -> Tuple[
         bool,
         AbstractSet[str],
-        Awaitable[Iterator[Completion]],
+        Awaitable[Tuple[Iterator[Completion], int]],
         Callable[[Optional[str], Iterable[Completion]], Awaitable[None]],
     ]:
         cache_ctx = self._cache_ctx
@@ -81,19 +86,21 @@ class CacheWorker:
             commit_id=context.commit_id,
             buf_id=context.buf_id,
             row=row,
-            text_before=context.syms_before,
+            syms_before=context.syms_before,
         )
 
-        use_cache = _use_cache(cache_ctx, ctx=context) and bool(self._cached)
+        use_cache = _use_cache(
+            self._supervisor.match, cache=cache_ctx, ctx=context
+        ) and bool(self._cached)
         cached_clients = {*self._clients}
 
         if not use_cache:
             self._clients.clear()
             self._cached.clear()
 
-        async def get() -> Iterator[Completion]:
+        async def get() -> Tuple[Iterator[Completion], int]:
             with timeit("CACHE -- GET"):
-                keys = await self._db.select(
+                keys, length = await self._db.select(
                     not use_cache,
                     opts=self._supervisor.match,
                     word=context.words,
@@ -105,7 +112,7 @@ class CacheWorker:
                     for key, sort_by in keys
                     if (comp := self._cached.get(key))
                 )
-                return comps
+                return comps, length
 
         async def set_cache(
             client: Optional[str], completions: Iterable[Completion]
