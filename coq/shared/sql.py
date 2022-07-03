@@ -73,8 +73,8 @@ class _Quantiles:
 
 def init_db(conn: Connection) -> None:
     add_functions(conn)
-    conn.create_function("X_SIMILARITY", narg=3, func=quick_ratio, deterministic=True)
-    conn.create_function("X_NORM_CASE", narg=1, func=normcase, deterministic=True)
+    conn.create_function("X_SIMILARITY", 3, func=quick_ratio, deterministic=True)
+    conn.create_function("X_NORM_CASE", 1, func=normcase, deterministic=True)
     conn.create_aggregate(
-        "X_QUANTILES", n_arg=-1, aggregate_class=cast(Any, _Quantiles)
+        "X_QUANTILES", -1, cast(Any, _Quantiles)
     )
