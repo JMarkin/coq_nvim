@@ -1,4 +1,4 @@
-git+https://github.com/ms-jpq/std2
+git+https://github.com/JMarkin/std2
 git+https://github.com/ms-jpq/pynvim_pp
 pynvim==0.4.3
 PyYAML==5.4.1
