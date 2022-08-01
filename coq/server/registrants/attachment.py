@@ -1,6 +1,7 @@
 from asyncio import gather
 from contextlib import suppress
 from dataclasses import dataclass
+from itertools import count
 from queue import SimpleQueue
 from typing import Mapping, Sequence, Tuple, cast
 from uuid import uuid4
@@ -35,11 +36,14 @@ def _buf_enter(nvim: Nvim, stack: Stack) -> None:
 autocmd("BufEnter", "InsertEnter") << f"lua {NAMESPACE}.{_buf_enter.name}()"
 atomic.exec_lua(f"{NAMESPACE}.{_buf_enter.name}()", ())
 
-q: SimpleQueue = SimpleQueue()
+_q: SimpleQueue = SimpleQueue()
+_id_gen = count()
+_current_id = -1
 
 
 @dataclass(frozen=True)
 class _Qmsg:
+    id: int
     pending: bool
     buf: Buffer
     range: Tuple[int, int]
@@ -77,9 +81,11 @@ def _listener(nvim: Nvim, stack: Stack) -> None:
     async def cont() -> None:
         while True:
             with with_suppress():
-                qmsg: _Qmsg = await to_thread(q.get)
-                with suppress(NvimError):
-                    with timeit("POLL"):
+                qmsg: _Qmsg = await to_thread(_q.get)
+                if qmsg.id != _current_id:
+                    pass
+                else:
+                    with timeit("POLL"), suppress(NvimError):
                         (mode, comp_mode, filetype), _ = await gather(
                             _status(nvim, qmsg.buf), stack.supervisor.interrupt()
                         )
@@ -139,13 +145,16 @@ def _lines_event(
     lines: Sequence[str],
     pending: bool,
 ) -> None:
+    global _current_id
+    _current_id = next(_id_gen)
     msg = _Qmsg(
+        id=_current_id,
         pending=pending,
         buf=buf,
         range=(lo, hi),
         lines=lines,
     )
-    q.put(msg)
+    _q.put(msg)
 
 
 BUF_EVENTS = {
