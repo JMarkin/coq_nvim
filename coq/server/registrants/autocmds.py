@@ -4,7 +4,14 @@ from contextlib import suppress
 from typing import Optional
 
 from pynvim.api.nvim import Nvim, NvimError
-from pynvim_pp.api import buf_filetype, buf_get_option, cur_buf, get_cwd, win_close
+from pynvim_pp.api import (
+    buf_filetype,
+    buf_get_option,
+    buf_name,
+    cur_buf,
+    get_cwd,
+    win_close,
+)
 from pynvim_pp.float_win import list_floatwins
 from pynvim_pp.lib import async_call, awrite, go
 from std2.locale import si_prefixed_smol
@@ -25,7 +32,7 @@ def _kill_float_wins(nvim: Nvim, stack: Stack) -> None:
             win_close(nvim, win=win)
 
 
-autocmd("WinEnter") << f"lua {NAMESPACE}.{_kill_float_wins.name}()"
+_ = autocmd("WinEnter") << f"lua {NAMESPACE}.{_kill_float_wins.name}()"
 
 
 @rpc(blocking=True)
@@ -39,21 +46,22 @@ def _new_cwd(nvim: Nvim, stack: Stack) -> None:
     go(nvim, aw=cont())
 
 
-autocmd("DirChanged") << f"lua {NAMESPACE}.{_new_cwd.name}()"
+_ = autocmd("DirChanged") << f"lua {NAMESPACE}.{_new_cwd.name}()"
 
 
 @rpc(blocking=True)
 def _ft_changed(nvim: Nvim, stack: Stack) -> None:
     buf = cur_buf(nvim)
     ft = buf_filetype(nvim, buf=buf)
+    filename = buf_name(nvim, buf=buf)
 
     async def cont() -> None:
-        await stack.bdb.ft_update(buf.number, filetype=ft)
+        await stack.bdb.buf_update(buf.number, filetype=ft, filename=filename)
 
     go(nvim, aw=cont())
 
 
-autocmd("FileType") << f"lua {NAMESPACE}.{_ft_changed.name}()"
+_ = autocmd("FileType") << f"lua {NAMESPACE}.{_ft_changed.name}()"
 atomic.exec_lua(f"{NAMESPACE}.{_ft_changed.name}()", ())
 
 
@@ -69,6 +77,7 @@ def _insert_enter(nvim: Nvim, stack: Stack) -> None:
                 await stack.tdb.populate(
                     payload.buf,
                     filetype=payload.filetype,
+                    filename=payload.filename,
                     nodes=payload.payloads,
                 )
                 if payload.elapsed > ts.slow_threshold:
@@ -83,19 +92,22 @@ def _insert_enter(nvim: Nvim, stack: Stack) -> None:
     go(nvim, aw=cont())
 
 
-autocmd("InsertEnter") << f"lua {NAMESPACE}.{_insert_enter.name}()"
+_ = autocmd("InsertEnter") << f"lua {NAMESPACE}.{_insert_enter.name}()"
 
 
 @rpc(blocking=True)
 def _on_focus(nvim: Nvim, stack: Stack) -> None:
     async def cont() -> None:
-        snap = await snapshot(stack.settings.match.unifying_chars)
-        await stack.tmdb.periodical(snap)
+        current, panes = await snapshot(
+            stack.settings.clients.tmux.all_sessions,
+            unifying_chars=stack.settings.match.unifying_chars,
+        )
+        await stack.tmdb.periodical(current, panes=panes)
 
     go(nvim, aw=cont())
 
 
-autocmd("FocusGained") << f"lua {NAMESPACE}.{_on_focus.name}()"
+_ = autocmd("FocusGained") << f"lua {NAMESPACE}.{_on_focus.name}()"
 
 _HANDLE: Optional[Handle] = None
 
@@ -124,4 +136,4 @@ def _when_idle(nvim: Nvim, stack: Stack) -> None:
     )
 
 
-autocmd("CursorHold", "CursorHoldI") << f"lua {NAMESPACE}.{_when_idle.name}()"
+_ = autocmd("CursorHold", "CursorHoldI") << f"lua {NAMESPACE}.{_when_idle.name}()"

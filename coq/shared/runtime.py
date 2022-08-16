@@ -1,27 +1,16 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from asyncio import (
-    AbstractEventLoop,
-    Condition,
-    Lock,
-    Task,
-    as_completed,
-    gather,
-    sleep,
-    wait,
-)
+from asyncio import AbstractEventLoop, Condition, Event, Task, as_completed, sleep, wait
 from concurrent.futures import Executor
 from dataclasses import dataclass
-from itertools import chain
 from pathlib import Path
 from time import monotonic
 from typing import (
-    AbstractSet,
+    Any,
     AsyncIterator,
     Awaitable,
     Generic,
-    MutableMapping,
     MutableSequence,
     Optional,
     Protocol,
@@ -29,17 +18,18 @@ from typing import (
     TypeVar,
 )
 from uuid import UUID, uuid4
-from weakref import WeakKeyDictionary
+from weakref import WeakSet
 
 from pynvim import Nvim
 from pynvim_pp.lib import go
-from pynvim_pp.logging import log, with_suppress
+from pynvim_pp.logging import with_suppress
 from std2.asyncio import cancel
 
 from .settings import BaseClient, CompleteOptions, Limits, MatchOptions, Weights
-from .timeit import timeit
+from .timeit import TracingLocker, timeit
 from .types import Completion, Context
 
+_T = TypeVar("_T")
 _T_co = TypeVar("_T_co", contravariant=True)
 _O_co = TypeVar("_O_co", contravariant=True, bound=BaseClient)
 
@@ -54,17 +44,17 @@ class Metric:
     kind_width: int
 
 
-class PReviewer(Protocol):
+class PReviewer(Protocol[_T]):
     def register(self, assoc: BaseClient) -> None:
         ...
 
-    async def begin(self, context: Context) -> None:
+    async def begin(self, context: Context) -> _T:
         ...
 
-    async def s_begin(self, assoc: BaseClient, instance: UUID) -> None:
+    async def s_begin(self, token: _T, assoc: BaseClient, instance: UUID) -> None:
         ...
 
-    def trans(self, instance: UUID, completion: Completion) -> Metric:
+    def trans(self, token: _T, instance: UUID, completion: Completion) -> Metric:
         ...
 
     async def s_end(
@@ -90,18 +80,14 @@ class Supervisor:
         self.nvim, self._reviewer = nvim, reviewer
 
         self.idling = Condition()
-        self._workers: MutableMapping[Worker, BaseClient] = WeakKeyDictionary()
+        self._workers: WeakSet[Worker] = WeakSet()
 
-        self._lock = Lock()
-        self._tasks: MutableSequence[Task] = []
-
-    @property
-    def clients(self) -> AbstractSet[BaseClient]:
-        return {*self._workers.values()}
+        self._lock = TracingLocker(name="Supervisor", force=True)
+        self._work_task: Optional[Task] = None
 
     def register(self, worker: Worker, assoc: BaseClient) -> None:
         self._reviewer.register(assoc)
-        self._workers[worker] = assoc
+        self._workers.add(worker)
 
     def notify_idle(self) -> None:
         async def cont() -> None:
@@ -111,58 +97,37 @@ class Supervisor:
         go(self.nvim, aw=cont())
 
     async def interrupt(self) -> None:
-        g = gather(*self._tasks)
-        self._tasks.clear()
-        await cancel(g)
+        task = self._work_task
+        self._work_task = None
+        if task:
+            await cancel(task)
 
     def collect(self, context: Context) -> Awaitable[Sequence[Metric]]:
         loop: AbstractEventLoop = self.nvim.loop
-        t1, done = monotonic(), False
+        now, done = monotonic(), Event()
         timeout = (
             self.limits.completion_manual_timeout
             if context.manual
             else self.limits.completion_auto_timeout
         )
 
-        acc: MutableSequence[Metric] = []
-
-        async def supervise(worker: Worker, assoc: BaseClient) -> None:
-            instance, items = uuid4(), 0
-
-            with with_suppress(), timeit(f"WORKER -- {assoc.short_name}"):
-                await self._reviewer.s_begin(assoc, instance=instance)
-                try:
-                    async for completion in worker.work(context):
-                        if not done and completion:
-                            metric = self._reviewer.trans(
-                                instance, completion=completion
-                            )
-                            acc.append(metric)
-                            items += 1
-                        else:
-                            await sleep(0)
-                finally:
-                    elapsed = monotonic() - t1
-                    await self._reviewer.s_end(
-                        instance,
-                        interrupted=done,
-                        elapsed=elapsed,
-                        items=items,
-                    )
-
-        async def cont() -> Sequence[Metric]:
-            nonlocal done
+        async def cont(prev: Optional[Task]) -> Sequence[Metric]:
+            with timeit("CANCEL -- ALL"):
+                if prev:
+                    await cancel(prev)
 
             with with_suppress(), timeit("COLLECTED -- ALL"):
-                if self._lock.locked():
-                    log.warn("%s", "SHOULD NOT BE LOCKED <><> supervisor")
                 async with self._lock:
-                    await self._reviewer.begin(context)
+                    acc: MutableSequence[Metric] = []
+
+                    token = await self._reviewer.begin(context)
                     tasks = tuple(
-                        loop.create_task(supervise(worker, assoc=assoc))
-                        for worker, assoc in self._workers.items()
+                        worker.supervised(
+                            context, token=token, done=done, now=now, acc=acc
+                        )
+                        for worker in self._workers
                     )
-                    self._tasks.extend(tasks)
+
                     try:
                         if not tasks:
                             return ()
@@ -175,23 +140,63 @@ class Supervisor:
                                         break
                             return acc
                     finally:
-                        done = True
+                        done.set()
 
-        task = loop.create_task(cont())
-        self._tasks.append(task)
+        self._work_task = task = loop.create_task(cont(self._work_task))
         return task
 
 
 class Worker(Generic[_O_co, _T_co]):
     def __init__(self, supervisor: Supervisor, options: _O_co, misc: _T_co) -> None:
-        self._work_lock = Lock()
+        self._work_task: Optional[Task] = None
+        self._work_lock = TracingLocker(name=options.short_name, force=True)
         self._supervisor, self._options, self._misc = supervisor, options, misc
         self._supervisor.register(self, assoc=options)
 
-    def _check_locked(self) -> None:
-        if self._work_lock.locked():
-            log.warn("%s", f"LOCKED :: {self._options.short_name}")
-
     @abstractmethod
-    def work(self, context: Context) -> AsyncIterator[Optional[Completion]]:
+    def work(self, context: Context) -> AsyncIterator[Completion]:
         ...
+
+    def supervised(
+        self,
+        context: Context,
+        token: Any,
+        done: Event,
+        now: float,
+        acc: MutableSequence[Metric],
+    ) -> Task:
+        loop: AbstractEventLoop = self._supervisor.nvim.loop
+        prev = self._work_task
+
+        async def cont() -> None:
+            instance, items = uuid4(), 0
+
+            with timeit(f"CANCEL WORKER -- {self._options.short_name}"):
+                if prev:
+                    await cancel(prev)
+
+            with with_suppress(), timeit(f"WORKER -- {self._options.short_name}"):
+                await self._supervisor._reviewer.s_begin(
+                    token, assoc=self._options, instance=instance
+                )
+                try:
+                    async for completion in self.work(context):
+                        if not done.is_set():
+                            metric = self._supervisor._reviewer.trans(
+                                token, instance=instance, completion=completion
+                            )
+                            acc.append(metric)
+                            items += 1
+                        else:
+                            await sleep(0)
+                finally:
+                    elapsed = monotonic() - now
+                    await self._supervisor._reviewer.s_end(
+                        instance,
+                        interrupted=done.is_set(),
+                        elapsed=elapsed,
+                        items=items,
+                    )
+
+        self._work_task = task = loop.create_task(cont())
+        return task
