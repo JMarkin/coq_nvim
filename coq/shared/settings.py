@@ -101,6 +101,7 @@ class Weights:
 class CompleteOptions:
     always: bool
     smart: bool
+    replace_prefix_threshold: int
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,7 @@ class KeyMapping:
     jump_to_mark: Optional[str]
     bigger_preview: Optional[str]
     eval_snips: Optional[str]
+    manual_complete_insertion_only: Optional[bool]
 
 
 @dataclass(frozen=True)
