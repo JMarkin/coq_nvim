@@ -156,10 +156,12 @@ class ExternPath:
 @dataclass(frozen=True)
 class Completion:
     source: str
+    always_on_top: bool
     weight_adjust: float
     label: str
     sort_by: str
     primary_edit: Edit
+    adjust_indent: bool
     icon_match: Optional[str]
 
     uid: UUID = field(default_factory=uuid4)

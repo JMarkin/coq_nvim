@@ -60,10 +60,12 @@ def _trans(client: TSClient, context: Context, payload: Payload) -> Completion:
     icon_match, _, _ = payload.kind.partition(".")
     cmp = Completion(
         source=client.short_name,
+        always_on_top=client.always_on_top,
         weight_adjust=client.weight_adjust,
         label=edit.new_text,
         sort_by=payload.text,
         primary_edit=edit,
+        adjust_indent=False,
         kind=payload.kind,
         doc=_doc(client, context=context, payload=payload),
         icon_match=icon_match,

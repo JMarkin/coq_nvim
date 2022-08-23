@@ -24,7 +24,7 @@ from ...shared.fuzzy import multi_set_ratio
 from ...shared.parse import lower
 from ...shared.runtime import Supervisor
 from ...shared.runtime import Worker as BaseWorker
-from ...shared.settings import BaseClient, MatchOptions
+from ...shared.settings import LSPClient, MatchOptions
 from ...shared.sql import BIGGEST_INT
 from ...shared.timeit import timeit
 from ...shared.trans import cword_before
@@ -62,19 +62,6 @@ def _use_comp(match: MatchOptions, context: Context, sort_by: str, edit: Edit) -
         return False
 
 
-def _fast_comp(
-    look_ahead: int,
-    lower_word: str,
-    lower_word_prefix: str,
-    sort_by: str,
-) -> bool:
-    if not lower_word_prefix:
-        return True
-    else:
-        lo = lower(sort_by)
-        return lo[:look_ahead] == lower_word_prefix and not lower_word.startswith(lo)
-
-
 @dataclass(frozen=True)
 class _LocalCache:
     pre: MutableMapping[Optional[str], Tuple[Iterator[Completion], int]] = field(
@@ -85,8 +72,8 @@ class _LocalCache:
     )
 
 
-class Worker(BaseWorker[BaseClient, None]):
-    def __init__(self, supervisor: Supervisor, options: BaseClient, misc: None) -> None:
+class Worker(BaseWorker[LSPClient, None]):
+    def __init__(self, supervisor: Supervisor, options: LSPClient, misc: None) -> None:
         super().__init__(supervisor, options=options, misc=misc)
         self._cache = CacheWorker(supervisor)
         self._local_cached = _LocalCache()
@@ -98,6 +85,7 @@ class Worker(BaseWorker[BaseClient, None]):
         return comp_lsp(
             self._supervisor.nvim,
             short_name=self._options.short_name,
+            always_on_top=self._options.always_on_top,
             weight_adjust=self._options.weight_adjust,
             context=context,
             clients=set() if context.manual else cached_clients,
@@ -125,10 +113,6 @@ class Worker(BaseWorker[BaseClient, None]):
             limit = (
                 BIGGEST_INT if context.manual else self._supervisor.match.max_results
             )
-            fast_limit = self._supervisor.match.max_results * 3
-            lower_word_prefix = context.l_words_before[
-                : self._supervisor.match.look_ahead
-            ]
 
             use_cache, cached_clients, cached = self._cache.apply_cache(context)
             if not use_cache:
@@ -175,7 +159,6 @@ class Worker(BaseWorker[BaseClient, None]):
                     if seen >= limit:
                         break
 
-                    fast_search = lsp_comps.length > fast_limit
                     acc = self._local_cached.post.setdefault(lsp_comps.client, [])
 
                     if lsp_comps.local_cache and lsp_comps.length:
@@ -190,20 +173,11 @@ class Worker(BaseWorker[BaseClient, None]):
                             yield comp
                         else:
                             acc.append(comp)
-                            if (
-                                _fast_comp(
-                                    self._supervisor.match.look_ahead,
-                                    lower_word=context.l_words_before,
-                                    lower_word_prefix=lower_word_prefix,
-                                    sort_by=comp.sort_by,
-                                )
-                                if fast_search
-                                else _use_comp(
-                                    self._supervisor.match,
-                                    context=context,
-                                    sort_by=comp.sort_by,
-                                    edit=comp.primary_edit,
-                                )
+                            if _use_comp(
+                                self._supervisor.match,
+                                context=context,
+                                sort_by=comp.sort_by,
+                                edit=comp.primary_edit,
                             ):
                                 seen += 1
                                 yield comp

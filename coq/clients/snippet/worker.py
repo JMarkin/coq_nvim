@@ -30,8 +30,10 @@ class Worker(BaseWorker[SnippetClient, SDB]):
                 )
                 completion = Completion(
                     source=self._options.short_name,
+                    always_on_top=self._options.always_on_top,
                     weight_adjust=self._options.weight_adjust,
                     primary_edit=edit,
+                    adjust_indent=True,
                     sort_by=snip["word"],
                     label=label,
                     doc=doc,

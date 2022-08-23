@@ -102,6 +102,7 @@ class CompleteOptions:
     always: bool
     smart: bool
     replace_prefix_threshold: int
+    skip_after: AbstractSet[str]
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,16 @@ class KeyMapping:
     bigger_preview: Optional[str]
     eval_snips: Optional[str]
     manual_complete_insertion_only: Optional[bool]
+
+
+@dataclass(frozen=True)
+class _AlwaysTop:
+    always_on_top: bool
+
+
+@dataclass(frozen=True)
+class _AlwaysTops:
+    always_on_top: Optional[AbstractSet[Optional[str]]]
 
 
 @dataclass(frozen=True)
@@ -134,34 +145,39 @@ class PathResolution(Enum):
 
 
 @dataclass(frozen=True)
-class PathsClient(BaseClient):
+class PathsClient(BaseClient, _AlwaysTop):
     resolution: AbstractSet[PathResolution]
     preview_lines: int
     path_seps: AbstractSet[str]
 
 
 @dataclass(frozen=True)
-class BuffersClient(_WordbankClient):
+class BuffersClient(_WordbankClient, _AlwaysTop):
     same_filetype: bool
     parent_scope: str
 
 
 @dataclass(frozen=True)
-class TagsClient(BaseClient):
+class TagsClient(BaseClient, _AlwaysTop):
     parent_scope: str
     path_sep: str
 
 
 @dataclass(frozen=True)
-class TmuxClient(_WordbankClient, TagsClient):
+class TmuxClient(_WordbankClient, TagsClient, _AlwaysTop):
     all_sessions: bool
 
 
 @dataclass(frozen=True)
-class TSClient(BaseClient):
+class TSClient(BaseClient, _AlwaysTop):
     path_sep: str
     search_context: int
     slow_threshold: float
+
+
+@dataclass(frozen=True)
+class T9Client(BaseClient, _AlwaysTop):
+    ...
 
 
 class SnippetWarnings(Enum):
@@ -170,14 +186,19 @@ class SnippetWarnings(Enum):
 
 
 @dataclass(frozen=True)
-class SnippetClient(BaseClient):
+class SnippetClient(BaseClient, _AlwaysTop):
     user_path: Optional[Path]
     warn: AbstractSet[SnippetWarnings]
 
 
 @dataclass(frozen=True)
-class LSPClient(BaseClient):
+class LSPClient(BaseClient, _AlwaysTops):
     resolve_timeout: float
+
+
+@dataclass(frozen=True)
+class ThirdPartyClient(BaseClient, _AlwaysTops):
+    ...
 
 
 @dataclass(frozen=True)
@@ -186,11 +207,11 @@ class Clients:
     lsp: LSPClient
     paths: PathsClient
     snippets: SnippetClient
-    tabnine: BaseClient
+    tabnine: T9Client
     tags: TagsClient
+    third_party: ThirdPartyClient
     tmux: TmuxClient
     tree_sitter: TSClient
-    third_party: BaseClient
 
 
 @dataclass(frozen=True)

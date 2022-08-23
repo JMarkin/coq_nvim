@@ -2,7 +2,7 @@ from asyncio import Event, Task, gather, sleep, wait
 from asyncio.events import AbstractEventLoop
 from dataclasses import replace
 from queue import SimpleQueue
-from typing import Any, Literal, Mapping, Optional, Sequence, Tuple, Union
+from typing import AbstractSet, Any, Literal, Mapping, Optional, Sequence, Tuple, Union
 from uuid import UUID, uuid4
 
 from pynvim import Nvim
@@ -37,7 +37,9 @@ from ..trans import trans
 _Q: SimpleQueue = SimpleQueue()
 
 
-def _should_cont(state: State, prev: Context, cur: Context) -> bool:
+def _should_cont(
+    state: State, prev: Context, cur: Context, skip_after: AbstractSet[str]
+) -> bool:
     if cur.manual:
         return True
     elif prev.change_id == cur.change_id:
@@ -47,11 +49,16 @@ def _should_cont(state: State, prev: Context, cur: Context) -> bool:
             return extern.is_dir
         else:
             return False
+    elif any(cur.line_before.endswith(token) for token in skip_after):
+        return False
     elif cur.syms_before != "":
         return True
     else:
-        stripped = cur.line_before.rstrip()
-        return bool(stripped) and len(cur.line_before) - len(stripped) <= 1
+        have_space = (
+            bool(stripped := cur.line_before.rstrip())
+            and len(cur.line_before) - len(stripped) <= 1
+        )
+        return have_space
 
 
 @rpc(blocking=True)
@@ -75,7 +82,16 @@ def _launch_loop(nvim: Nvim, stack: Stack) -> None:
                             manual=manual,
                         ),
                     )
-                    should = _should_cont(s, prev=s.context, cur=ctx) if ctx else False
+                    should = (
+                        _should_cont(
+                            s,
+                            prev=s.context,
+                            cur=ctx,
+                            skip_after=stack.settings.completion.skip_after,
+                        )
+                        if ctx
+                        else False
+                    )
                     _, col = ctx.position
 
                     if should:

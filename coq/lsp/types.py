@@ -1,9 +1,24 @@
 from dataclasses import dataclass
-from typing import Any, Iterator, Literal, Optional, Sequence, TypedDict, Union
+from typing import (
+    AbstractSet,
+    Any,
+    Iterator,
+    Literal,
+    Optional,
+    Sequence,
+    TypedDict,
+    Union,
+)
 
 from ..shared.types import Completion
 
 # https://microsoft.github.io/language-server-protocol/specification
+
+
+@dataclass(frozen=True)
+class _CompletionItemLabelDetails:
+    detail: Optional[str] = None
+    description: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -13,22 +28,30 @@ class _Position:
 
 
 @dataclass(frozen=True)
+class _TextEdit:
+    newText: str
+
+
+@dataclass(frozen=True)
 class _Range:
     start: _Position
     end: _Position
 
 
 @dataclass(frozen=True)
-class TextEdit:
-    newText: str
+class _InsertReplaceRange:
+    insert: _Range
+    replace: _Range
+
+
+@dataclass(frozen=True)
+class TextEdit(_TextEdit):
     range: _Range
 
 
 @dataclass(frozen=True)
-class InsertReplaceEdit:
-    newText: str
-    insert: _Range
-    replace: _Range
+class InsertReplaceEdit(_TextEdit, _InsertReplaceRange):
+    ...
 
 
 _CompletionItemKind = int
@@ -55,6 +78,7 @@ class Command:
 @dataclass(frozen=True)
 class CompletionItem:
     label: str
+    labelDetails: Optional[_CompletionItemLabelDetails] = None
 
     kind: Optional[_CompletionItemKind] = None
     tags: Optional[Sequence[_CompletionItemTag]] = None
@@ -76,9 +100,19 @@ class CompletionItem:
     data: Optional[Any] = None
 
 
+@dataclass(frozen=True)
+class ItemDefaults:
+    commitCharacters: Optional[AbstractSet[str]] = frozenset()
+    editRange: Union[_Range, _InsertReplaceRange, None] = None
+    insertTextFormat: Optional[_InsertTextFormat] = None
+    insertTextMode: Optional[_InsertTextMode] = None
+    data: Optional[Any] = None
+
+
 class _CompletionList(TypedDict):
     isIncomplete: bool
     items: Sequence[CompletionItem]
+    itemDefaults: Optional[ItemDefaults]
 
 
 CompletionResponse = Union[

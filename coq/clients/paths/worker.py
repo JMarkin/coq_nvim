@@ -221,7 +221,9 @@ class Worker(BaseWorker[PathsClient, None]):
 
             base_paths = {*cont()}
 
-            limit = BIGGEST_INT if context.manual else self._supervisor.match.max_results
+            limit = (
+                BIGGEST_INT if context.manual else self._supervisor.match.max_results
+            )
             aw = tuple(
                 _parse(
                     p,
@@ -244,6 +246,7 @@ class Worker(BaseWorker[PathsClient, None]):
                         edit = Edit(new_text=new_text)
                         completion = Completion(
                             source=self._options.short_name,
+                            always_on_top=self._options.always_on_top,
                             weight_adjust=self._options.weight_adjust,
                             label=edit.new_text,
                             sort_by=_sort_by(
@@ -252,6 +255,7 @@ class Worker(BaseWorker[PathsClient, None]):
                                 new_text=new_text,
                             ),
                             primary_edit=edit,
+                            adjust_indent=False,
                             extern=ExternPath(is_dir=is_dir, path=path),
                             icon_match="Folder" if new_text.endswith(sep) else "File",
                         )
