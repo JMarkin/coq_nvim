@@ -23,7 +23,9 @@ EMPTY_CONTEXT = Context(
     expandtab=True,
     comment=("", ""),
     position=(0, 0),
+    cursor=(0, 0, 0, 0),
     scr_col=0,
+    win_size=0,
     line="",
     line_before="",
     line_after="",
@@ -43,6 +45,7 @@ EMPTY_CONTEXT = Context(
     l_syms_before="",
     l_syms_after="",
     is_lower=True,
+    change=None,
 )
 
 
@@ -53,7 +56,7 @@ def cword_before(
 
     if char.isspace():
         return context.ws_before
-    elif is_word(char, unifying_chars=unifying_chars):
+    elif is_word(unifying_chars, chr=char):
         return context.l_words_before if lower else context.words_before
     else:
         return context.l_syms_before if lower else context.syms_before
@@ -66,7 +69,7 @@ def cword_after(
 
     if char.isspace():
         return context.ws_after
-    elif is_word(char, unifying_chars=unifying_chars):
+    elif is_word(unifying_chars, chr=char):
         return context.l_words_after if lower else context.words_after
     else:
         return context.l_syms_after if lower else context.syms_after

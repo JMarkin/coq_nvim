@@ -1,3 +1,4 @@
+from contextlib import suppress
 from datetime import datetime
 from pathlib import PurePath
 from posixpath import normcase
@@ -14,23 +15,28 @@ from typing import (
     Pattern,
     Sequence,
     Tuple,
-    cast,
 )
 from uuid import uuid4
 
+from std2.functools import identity
+from std2.lex import ParseError as StdLexError
+from std2.lex import split
+from std2.string import removeprefix, removesuffix
+
 from ...shared.parse import lower
 from ...shared.types import Context
-from .parser import context_from, next_char, pushback_chars, raise_err, token_parser
+from .lexer import context_from, next_char, pushback_chars, raise_err, token_parser
 from .types import (
-    Begin,
-    DummyBegin,
     EChar,
     End,
     Index,
+    IntBegin,
     Parsed,
     ParseInfo,
     ParserCtx,
     TokenStream,
+    Transform,
+    VarBegin,
 )
 
 #
@@ -74,7 +80,7 @@ _RE_FLAGS = {
 _REGEX_FLAG_CHARS = {*_RE_FLAGS, "g", "u"}
 
 
-def _parse_escape(context: ParserCtx, *, escapable_chars: AbstractSet[str]) -> str:
+def _lex_escape(context: ParserCtx, *, escapable_chars: AbstractSet[str]) -> str:
     pos, char = next_char(context)
     assert char == "\\"
 
@@ -91,20 +97,31 @@ def _parse_escape(context: ParserCtx, *, escapable_chars: AbstractSet[str]) -> s
         )
 
 
+def _choice_trans(choice: Optional[str]) -> Sequence[str]:
+    sep, text = "|", removesuffix(removeprefix(choice or "", prefix="["), suffix="]")
+    with suppress(StdLexError):
+        return tuple(split(text, sep=sep, esc="\\"))
+    return text.split(sep)
+
+
 # choice      ::= '${' int '|' text (',' text)* '|}'
-def _half_parse_choice(context: ParserCtx) -> TokenStream:
+def _half_lex_choice(context: ParserCtx, idx: int) -> TokenStream:
     pos, char = next_char(context)
     assert char == "|"
 
-    yield " "
+    yield "["
     for pos, char in context:
         if char == "\\":
             pushback_chars(context, (pos, char))
-            yield _parse_escape(context, escapable_chars=_CHOICE_ESC_CHARS)
+            for char in _lex_escape(context, escapable_chars=_CHOICE_ESC_CHARS):
+                if char in {"\\", "|"}:
+                    yield "\\"
+                yield char
         elif char == "|":
             pos, char = next_char(context)
             if char == "}":
-                yield " "
+                yield "]"
+                yield Transform(var_subst=None, maybe_idx=idx, xform=_choice_trans)
                 yield End()
                 break
             else:
@@ -123,14 +140,15 @@ def _half_parse_choice(context: ParserCtx) -> TokenStream:
 
 # tabstop | choice | placeholder
 # -- all starts with (int)
-def _parse_tcp(context: ParserCtx) -> TokenStream:
+def _lex_tcp(context: ParserCtx) -> TokenStream:
     idx_acc: MutableSequence[str] = []
 
     for pos, char in context:
         if char in _INT_CHARS:
             idx_acc.append(char)
         else:
-            yield Begin(idx=int("".join(idx_acc)))
+            idx = int("".join(idx_acc))
+            yield IntBegin(idx=idx)
             if char == "}":
                 # tabstop     ::= '$' int | '${' int '}'
                 yield End()
@@ -138,11 +156,11 @@ def _parse_tcp(context: ParserCtx) -> TokenStream:
             elif char == "|":
                 # choice      ::= '${' int '|' text (',' text)* '|}'
                 pushback_chars(context, (pos, char))
-                yield from _half_parse_choice(context)
+                yield from _half_lex_choice(context, idx=idx)
                 break
             elif char == ":":
                 # placeholder ::= '${' int ':' any '}'
-                context.state.depth += 1
+                context.stack.append(idx)
                 break
             else:
                 raise_err(
@@ -263,7 +281,7 @@ def _variable_substitution(context: ParserCtx, *, var_name: str) -> Optional[str
 
 
 # variable    ::= '$' var
-def _parse_variable_naked(context: ParserCtx) -> TokenStream:
+def _lex_variable_naked(context: ParserCtx) -> TokenStream:
     name_acc: MutableSequence[str] = []
 
     for pos, char in context:
@@ -278,14 +296,14 @@ def _parse_variable_naked(context: ParserCtx) -> TokenStream:
 
 
 # regex
-def _parse_regex(context: ParserCtx) -> Iterator[EChar]:
+def _lex_regex(context: ParserCtx) -> Iterator[EChar]:
     _, char = next_char(context)
     assert char == "/"
 
     for pos, char in context:
         if char == "\\":
             pushback_chars(context, (pos, char))
-            char = _parse_escape(context, escapable_chars=_REGEX_ESC_CHARS)
+            char = _lex_escape(context, escapable_chars=_REGEX_ESC_CHARS)
             yield pos, char
 
         elif char == "/":
@@ -297,14 +315,14 @@ def _parse_regex(context: ParserCtx) -> Iterator[EChar]:
 
 
 # options
-def _parse_options(context: ParserCtx) -> RegexFlag:
+def _lex_options(context: ParserCtx) -> RegexFlag:
     pos, char = next_char(context)
     assert char == "/"
 
     flag = 0
     for pos, char in context:
         if char in _REGEX_FLAG_CHARS:
-            flag = flag | _RE_FLAGS.get(char, 0)
+            flag |= _RE_FLAGS.get(char, 0)
 
         elif char == "}":
             break
@@ -318,14 +336,15 @@ def _parse_options(context: ParserCtx) -> RegexFlag:
                 actual=char,
             )
 
-    return cast(RegexFlag, flag)
+    ref = RegexFlag(flag)
+    return ref
 
 
 # ':' '/upcase' | '/downcase' | '/capitalize' '}'
 # ':+' if '}'
 # ':?' if ':' else '}'
 # ':-' else '}' | '${' int ':' else '}'
-def _parse_fmt_back(context: ParserCtx) -> Callable[[Optional[str]], str]:
+def _lex_fmt_back(context: ParserCtx) -> Callable[[str], str]:
     pos, char = next_char(context)
     assert char == ":"
 
@@ -335,7 +354,7 @@ def _parse_fmt_back(context: ParserCtx) -> Callable[[Optional[str]], str]:
         for pos, char in context:
             if char == "\\":
                 pushback_chars(context, (pos, char))
-                _ = _parse_escape(context, escapable_chars=_REGEX_ESC_CHARS)
+                _ = _lex_escape(context, escapable_chars=_REGEX_ESC_CHARS)
             elif char == stop:
                 break
             else:
@@ -345,43 +364,42 @@ def _parse_fmt_back(context: ParserCtx) -> Callable[[Optional[str]], str]:
     if char == "/":
         action = "".join(tuple(cont("}", init=None)))
 
-        def trans(var: Optional[str]) -> str:
-            lo = lower(var or "")
+        def trans(var: str) -> str:
             if action == "downcase":
-                return lo
+                return lower(var)
 
             elif action == "upcase":
-                return lo.upper()
+                return var.upper()
 
             elif action == "capitalize":
-                return lo.capitalize()
+                return lower(var).capitalize()
 
             else:
-                return var or ""
+                return var
 
     elif char == "+":
         replace = "".join(tuple(cont("}", init=None)))
 
-        def trans(var: Optional[str]) -> str:
-            return replace if var is None else var
+        def trans(var: str) -> str:
+            return replace if not var else var
 
     elif char == "?":
         replace_a = "".join(tuple(cont(":", init=None)))
         replace_b = "".join(tuple(cont("}", init=None)))
 
-        def trans(var: Optional[str]) -> str:
-            return replace_a if var is not None else replace_b
+        def trans(var: str) -> str:
+            return replace_a if var else replace_b
 
     elif char == "-":
         replace = "".join(tuple(cont(":", init=None)))
 
-        def trans(var: Optional[str]) -> str:
-            return var if var is not None else replace
+        def trans(var: str) -> str:
+            return var if var else replace
 
     else:
         replace = "".join(tuple(cont(":", init=None)))
 
-        def trans(var: Optional[str]) -> str:
+        def trans(var: str) -> str:
             return var if var else replace
 
     pos, char = next_char(context)
@@ -403,7 +421,7 @@ def _parse_fmt_back(context: ParserCtx) -> Callable[[Optional[str]], str]:
 #                 | '${' int ':+' if '}'
 #                 | '${' int ':?' if ':' else '}'
 #                 | '${' int ':-' else '}' | '${' int ':' else '}'
-def _parse_fmt(context: ParserCtx) -> Tuple[int, Callable[[Optional[str]], str]]:
+def _lex_fmt(context: ParserCtx) -> Tuple[int, Callable[[str], str]]:
     pos, char = next_char(context)
     assert char == "/"
 
@@ -437,7 +455,7 @@ def _parse_fmt(context: ParserCtx) -> Tuple[int, Callable[[Optional[str]], str]]
                         actual=char,
                     )
             group = int("".join(idx_acc))
-            return group, lambda x: x or ""
+            return group, identity
 
         # ${ int
         elif char == "{":
@@ -449,13 +467,13 @@ def _parse_fmt(context: ParserCtx) -> Tuple[int, Callable[[Optional[str]], str]]
                 # '${' int '}'
                 elif char == "}":
                     group = int("".join(idx_acc)) if idx_acc else 0
-                    return group, lambda x: x or ""
+                    return group, identity
 
                 # ...
                 elif char == ":":
                     pushback_chars(context, (pos, char))
                     group = int("".join(idx_acc)) if idx_acc else 0
-                    trans = _parse_fmt_back(context)
+                    trans = _lex_fmt_back(context)
                     return group, trans
 
                 else:
@@ -512,35 +530,38 @@ def _compile(
 
 
 # | '${' var '/' regex '/' (format | text)+ '/' options '}'
-def _parse_variable_decorated(context: ParserCtx, var_name: str) -> TokenStream:
+def _lex_variable_decorated(context: ParserCtx, var_name: str) -> TokenStream:
     pos, char = next_char(context)
     assert char == "/"
 
     pushback_chars(context, (pos, char))
-    regex = tuple(_parse_regex(context))
-    group, trans = _parse_fmt(context)
-    flag = _parse_options(context)
+    regex = tuple(_lex_regex(context))
+    group, trans = _lex_fmt(context)
+    flag = _lex_options(context)
 
-    subst = _variable_substitution(context, var_name=var_name)
-    subst = var_name if subst is None else subst
+    sub = _variable_substitution(context, var_name=var_name)
     re = _compile(context, origin=pos, regex=regex, flag=flag)
-    match = re.match(subst)
+    subst = var_name if sub is None else sub
 
-    if match:
-        try:
-            matched = match.group(group)
-        except IndexError:
-            yield from trans(None)
-        else:
-            yield from trans(matched)
-    else:
-        yield from trans(None)
+    def xform(val: Optional[str]) -> str:
+        text = val or subst
+        if match := re.match(text):
+            with suppress(IndexError):
+                matched = match.group(group)
+                return trans(matched)
+        return trans(subst)
+
+    yield (var_subst := xform(None))
+    for idx in reversed(context.stack):
+        if isinstance(idx, int):
+            yield Transform(var_subst=var_subst, maybe_idx=idx, xform=xform)
+            break
 
 
 # variable    ::= '$' var | '${' var }'
 #                | '${' var ':' any '}'
 #                | '${' var '/' regex '/' (format | text)+ '/' options '}'
-def _parse_variable_nested(context: ParserCtx) -> TokenStream:
+def _lex_variable_nested(context: ParserCtx) -> TokenStream:
     name_acc: MutableSequence[str] = []
 
     for pos, char in context:
@@ -560,18 +581,18 @@ def _parse_variable_nested(context: ParserCtx) -> TokenStream:
             var = _variable_substitution(context, var_name=name)
             if var is not None:
                 yield var
-                context.state.depth += 1
-                yield from _parse(context, shallow=True)
+                context.stack.append(name)
+                yield from _lex(context, shallow=True)
             else:
-                yield DummyBegin()
-                context.state.depth += 1
+                yield VarBegin(name=name)
+                context.stack.append(name)
             break
 
         elif char == "/":
             # '${' var '/' regex '/' (format | text)+ '/' options '}'
             name = "".join(name_acc)
             pushback_chars(context, (pos, char))
-            yield from _parse_variable_decorated(context, var_name=name)
+            yield from _lex_variable_decorated(context, var_name=name)
             break
 
         else:
@@ -585,7 +606,7 @@ def _parse_variable_nested(context: ParserCtx) -> TokenStream:
 
 
 # ${...}
-def _parse_inner_scope(context: ParserCtx) -> TokenStream:
+def _lex_inner_scope(context: ParserCtx) -> TokenStream:
     pos, char = next_char(context)
     assert char == "{"
 
@@ -593,11 +614,11 @@ def _parse_inner_scope(context: ParserCtx) -> TokenStream:
     if char in _INT_CHARS:
         # tabstop | placeholder | choice
         pushback_chars(context, (pos, char))
-        yield from _parse_tcp(context)
+        yield from _lex_tcp(context)
     elif char in _VAR_BEGIN_CHARS:
         # variable
         pushback_chars(context, (pos, char))
-        yield from _parse_variable_nested(context)
+        yield from _lex_variable_nested(context)
     else:
         raise_err(
             text=context.text,
@@ -609,14 +630,14 @@ def _parse_inner_scope(context: ParserCtx) -> TokenStream:
 
 
 # $...
-def _parse_scope(context: ParserCtx) -> TokenStream:
+def _lex_scope(context: ParserCtx) -> TokenStream:
     pos, char = next_char(context)
     assert char == "$"
 
     pos, char = next_char(context)
     if char == "{":
         pushback_chars(context, (pos, char))
-        yield from _parse_inner_scope(context)
+        yield from _lex_inner_scope(context)
     elif char in _INT_CHARS:
         idx_acc = [char]
         # tabstop     ::= '$' int
@@ -624,16 +645,16 @@ def _parse_scope(context: ParserCtx) -> TokenStream:
             if char in _INT_CHARS:
                 idx_acc.append(char)
             else:
-                yield Begin(idx=int("".join(idx_acc)))
+                yield IntBegin(idx=int("".join(idx_acc)))
                 yield End()
                 pushback_chars(context, (pos, char))
                 break
         else:
-            yield Begin(idx=int("".join(idx_acc)))
+            yield IntBegin(idx=int("".join(idx_acc)))
             yield End()
     elif char in _VAR_BEGIN_CHARS:
         pushback_chars(context, (pos, char))
-        yield from _parse_variable_naked(context)
+        yield from _lex_variable_naked(context)
     else:
         raise_err(
             text=context.text,
@@ -645,25 +666,25 @@ def _parse_scope(context: ParserCtx) -> TokenStream:
 
 
 # any         ::= tabstop | placeholder | choice | variable | text
-def _parse(context: ParserCtx, shallow: bool) -> TokenStream:
+def _lex(context: ParserCtx, shallow: bool) -> TokenStream:
     for pos, char in context:
         if char == "\\":
             pushback_chars(context, (pos, char))
-            yield _parse_escape(context, escapable_chars=_ESC_CHARS)
-        elif context.state.depth and char == "}":
+            yield _lex_escape(context, escapable_chars=_ESC_CHARS)
+        elif context.stack and char == "}":
             yield End()
-            context.state.depth -= 1
+            context.stack.pop()
             if shallow:
                 break
         elif char == "$":
             pushback_chars(context, (pos, char))
-            yield from _parse_scope(context)
+            yield from _lex_scope(context)
         else:
             yield char
 
 
 def tokenizer(context: Context, info: ParseInfo, snippet: str) -> Parsed:
     ctx = context_from(snippet, context=context, info=info)
-    tokens = _parse(ctx, shallow=False)
+    tokens = _lex(ctx, shallow=False)
     parsed = token_parser(ctx, stream=tokens)
     return parsed

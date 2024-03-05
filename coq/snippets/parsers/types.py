@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterator, Sequence, Tuple, Union
+from typing import Iterator, MutableSequence, Optional, Sequence, Tuple, Union
 
 from std2.itertools import deiter
 
-from ...shared.types import Context
+from ...shared.types import Context, TextTransform, TextTransforms
 
 
-class ParseError(Exception):
-    ...
+class ParseError(Exception): ...
 
 
 @dataclass(frozen=True)
@@ -29,18 +28,13 @@ class ParseInfo:
     comment_str: Tuple[str, str]
 
 
-@dataclass(frozen=False)
-class ParserState:
-    depth: int
-
-
 @dataclass(frozen=True)
 class ParserCtx(Iterator):
     ctx: Context
     text: str
     info: ParseInfo
     dit: deiter[EChar]
-    state: ParserState
+    stack: MutableSequence[Union[int, str]]
 
     def __iter__(self) -> ParserCtx:
         return self
@@ -55,21 +49,27 @@ class Unparsed:
 
 
 @dataclass(frozen=True)
-class Begin:
+class IntBegin:
     idx: int
 
 
 @dataclass(frozen=True)
-class DummyBegin:
-    ...
+class VarBegin:
+    name: str
 
 
 @dataclass(frozen=True)
-class End:
-    ...
+class Transform:
+    var_subst: Optional[str]
+    maybe_idx: int
+    xform: TextTransform
 
 
-Token = Union[Unparsed, Begin, DummyBegin, End, str]
+@dataclass(frozen=True)
+class End: ...
+
+
+Token = Union[Unparsed, IntBegin, Transform, VarBegin, End, str]
 TokenStream = Iterator[Token]
 
 
@@ -85,3 +85,4 @@ class Parsed:
     text: str
     cursor: int
     regions: Sequence[Tuple[int, Region]]
+    xforms: TextTransforms

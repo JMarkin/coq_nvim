@@ -1,10 +1,10 @@
 from argparse import ArgumentParser, Namespace
+from asyncio import run as arun
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout, suppress
 from io import StringIO
-from multiprocessing import cpu_count
 from os import linesep
-from pathlib import Path
+from pathlib import Path, PurePath
 from subprocess import DEVNULL, STDOUT, CalledProcessError, run
 from sys import (
     executable,
@@ -15,7 +15,7 @@ from sys import (
     version_info,
 )
 from textwrap import dedent
-from typing import Union
+from typing import Any, Union
 
 from .consts import GIL_SWITCH, IS_WIN, REQUIREMENTS, RT_DIR, RT_PY, TOP_LEVEL, VARS
 
@@ -33,13 +33,28 @@ except ImportError:
     exit(1)
 
 
+with suppress(ImportError, PermissionError):
+    from os import nice
+
+    nice(-20)
+
+
+def _socket(arg: str) -> Any:
+    if arg.startswith("localhost:"):
+        host, _, port = arg.rpartition(":")
+        return host, int(port)
+    else:
+        return PurePath(arg)
+
+
 def parse_args() -> Namespace:
     parser = ArgumentParser()
 
     sub_parsers = parser.add_subparsers(dest="command", required=True)
 
     with nullcontext(sub_parsers.add_parser("run")) as p:
-        p.add_argument("--socket", required=True)
+        p.add_argument("--ppid", required=True, type=int)
+        p.add_argument("--socket", required=True, type=_socket)
         p.add_argument("--xdg")
 
     with nullcontext(sub_parsers.add_parser("deps")) as p:
@@ -64,7 +79,7 @@ _EXEC_PATH = Path(executable)
 _EXEC_PATH = _EXEC_PATH.parent.resolve(strict=True) / _EXEC_PATH.name
 _REQ = REQUIREMENTS.read_text()
 
-_IN_VENV = _RT_PY == _EXEC_PATH
+_IN_VENV = _RT_PY.parent.resolve() / _RT_PY.name == _EXEC_PATH
 
 
 if command == "deps":
@@ -83,10 +98,9 @@ if command == "deps":
                 symlinks=not IS_WIN,
                 clear=True,
             ).create(_RT_DIR)
-    except (ImportError, CalledProcessError):
+    except (ImportError, CalledProcessError, SystemExit):
         msg = "Please install python3-venv separately. (apt, yum, apk, etc)"
-        io_out.seek(0)
-        print(msg, io_out.read(), file=stderr)
+        print(msg, io_out.getvalue(), file=stderr)
         exit(1)
     else:
         proc = run(
@@ -142,10 +156,11 @@ elif command == "run":
         elif lock != _REQ:
             raise ImportError()
         else:
-            import pynvim
             import pynvim_pp
-            import std2
             import yaml
+            from std2.sys import autodie
+
+            from .client import init
     except ImportError as e:
         msg = f"""
         Please update dependencies using :COQdeps
@@ -158,16 +173,8 @@ elif command == "run":
         print(e, msg, sep=linesep, end="", file=stderr)
         exit(1)
     else:
-        from pynvim import attach
-        from pynvim_pp.client import run_client
-
-        from .client import CoqClient
-
-        nvim = attach("socket", path=args.socket)
-
-        with ThreadPoolExecutor(max_workers=min(64, max(32, cpu_count() + 10))) as pool:
-            code = run_client(nvim, pool=pool, client=CoqClient(pool=pool))
-            exit(code)
+        with ThreadPoolExecutor() as th:
+            arun(init(args.socket, ppid=args.ppid, th=th))
 
 else:
     assert False

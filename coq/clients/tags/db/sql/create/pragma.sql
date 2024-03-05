@@ -1,0 +1,1 @@
+../../../../snippet/db/sql/create/pragma.sql

@@ -8,8 +8,8 @@ from pynvim_pp.float_win import Border
 
 @dataclass(frozen=True)
 class Limits:
+    tokenization_limit: int
     idle_timeout: float
-    index_cutoff: int
     completion_auto_timeout: float
     completion_manual_timeout: float
     download_retries: int
@@ -49,6 +49,7 @@ class PreviewPositions:
 
 @dataclass(frozen=True)
 class PreviewDisplay:
+    enabled: bool
     x_max_len: int
     positions: PreviewPositions
     border: Border
@@ -70,6 +71,11 @@ class Icons:
 
 
 @dataclass(frozen=True)
+class Statusline:
+    helo: bool
+
+
+@dataclass(frozen=True)
 class Display:
     ghost_text: GhostText
     pum: PumDisplay
@@ -77,13 +83,13 @@ class Display:
     icons: Icons
     time_fmt: str
     mark_highlight_group: str
+    statusline: Statusline
 
 
 @dataclass(frozen=True)
 class MatchOptions:
     unifying_chars: AbstractSet[str]
     max_results: int
-    proximate_lines: int
     look_ahead: int
     exact_matches: int
     fuzzy_cutoff: float
@@ -102,6 +108,7 @@ class CompleteOptions:
     always: bool
     smart: bool
     replace_prefix_threshold: int
+    replace_suffix_threshold: int
     skip_after: AbstractSet[str]
 
 
@@ -171,13 +178,11 @@ class TmuxClient(_WordbankClient, TagsClient, _AlwaysTop):
 @dataclass(frozen=True)
 class TSClient(BaseClient, _AlwaysTop):
     path_sep: str
-    search_context: int
     slow_threshold: float
 
 
 @dataclass(frozen=True)
-class T9Client(BaseClient, _AlwaysTop):
-    ...
+class T9Client(BaseClient, _AlwaysTop): ...
 
 
 class SnippetWarnings(Enum):
@@ -197,8 +202,52 @@ class LSPClient(BaseClient, _AlwaysTops):
 
 
 @dataclass(frozen=True)
-class ThirdPartyClient(BaseClient, _AlwaysTops):
-    ...
+class ThirdPartyClient(BaseClient, _AlwaysTops): ...
+
+
+_NamedRegisters = Literal[
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g",
+    "h",
+    "i",
+    "j",
+    "k",
+    "l",
+    "m",
+    "n",
+    "o",
+    "p",
+    "q",
+    "r",
+    "s",
+    "t",
+    "u",
+    "v",
+    "w",
+    "x",
+    "y",
+    "z",
+]
+
+
+@dataclass(frozen=True)
+class RegistersClient(_WordbankClient, _AlwaysTop):
+    lines: AbstractSet[_NamedRegisters]
+    max_yank_size: int
+    register_scope: str
+    words: AbstractSet[Union[Literal["0"], _NamedRegisters]]
+
+
+@dataclass(frozen=True)
+class ExecClient(_WordbankClient, _AlwaysTop):
+    viml: _NamedRegisters
+    lua: _NamedRegisters
+    shell: _NamedRegisters
 
 
 @dataclass(frozen=True)
@@ -206,6 +255,7 @@ class Clients:
     buffers: BuffersClient
     lsp: LSPClient
     paths: PathsClient
+    registers: RegistersClient
     snippets: SnippetClient
     tabnine: T9Client
     tags: TagsClient
@@ -225,3 +275,19 @@ class Settings:
     completion: CompleteOptions
     keymap: KeyMapping
     clients: Clients
+
+
+EMPTY_MATCH = MatchOptions(
+    unifying_chars=set(),
+    max_results=0,
+    look_ahead=0,
+    exact_matches=0,
+    fuzzy_cutoff=0,
+)
+EMPTY_COMP = CompleteOptions(
+    always=False,
+    smart=True,
+    replace_prefix_threshold=0,
+    replace_suffix_threshold=0,
+    skip_after=set(),
+)

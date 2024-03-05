@@ -33,6 +33,9 @@
 "source slow": |-
   ❌ 已消耗${elapsed}秒解析 ${source} 文档, 将在选中文件中禁用。
 
+"snip source not enabled": |-
+  ❌ 没有开启代码资源
+
 "no snippets found": |-
   ⚠️  未找到代码片段
 
@@ -47,10 +50,6 @@
 
 "fs snip load succ": |-
   ✅ 代码片段已更新 —— ${path}
-
-"fs snip needs compile": |-
-  ⚠️  代码片段须使用「:COQsnips compile」手动编译
-  ${paths}
 
 "begin T9 download": |-
   ⏳ 开始下载 T9……

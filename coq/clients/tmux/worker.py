@@ -1,16 +1,18 @@
+from asyncio import Lock
 from os import linesep
+from pathlib import Path
 from typing import AsyncIterator, Iterator
 
-from pynvim_pp.lib import go
-from pynvim_pp.logging import with_suppress
+from pynvim_pp.logging import suppress_and_log
 
-from ...databases.tmux.database import TMDB, TmuxWord
+from ...shared.executor import AsyncExecutor
 from ...shared.runtime import Supervisor
 from ...shared.runtime import Worker as BaseWorker
 from ...shared.settings import TmuxClient
 from ...shared.timeit import timeit
 from ...shared.types import Completion, Context, Doc, Edit
 from ...tmux.parse import snapshot
+from .db.database import TMDB, TmuxWord
 
 
 def _doc(client: TmuxClient, word: TmuxWord) -> Doc:
@@ -23,27 +25,49 @@ def _doc(client: TmuxClient, word: TmuxWord) -> Doc:
     return Doc(text=linesep.join(cont()), syntax="")
 
 
-class Worker(BaseWorker[TmuxClient, TMDB]):
-    def __init__(self, supervisor: Supervisor, options: TmuxClient, misc: TMDB) -> None:
-        super().__init__(supervisor, options=options, misc=misc)
-        go(supervisor.nvim, aw=self._poll())
+class Worker(BaseWorker[TmuxClient, Path]):
+    def __init__(
+        self, ex: AsyncExecutor, supervisor: Supervisor, options: TmuxClient, misc: Path
+    ) -> None:
+        self._exec = misc
+        self._lock = Lock()
+        self._db = TMDB(
+            supervisor.limits.tokenization_limit,
+            unifying_chars=supervisor.match.unifying_chars,
+            include_syms=options.match_syms,
+        )
+        super().__init__(ex, supervisor=supervisor, options=options, misc=misc)
+        self._ex.run(self._poll())
+
+    def interrupt(self) -> None:
+        with self._interrupt():
+            self._db.interrupt()
 
     async def _poll(self) -> None:
         while True:
-            with with_suppress():
-                with timeit("IDLE :: TMUX"):
-                    current, panes = await snapshot(
-                        self._options.all_sessions,
-                        unifying_chars=self._supervisor.match.unifying_chars,
-                    )
-                    await self._misc.periodical(current, panes=panes)
 
-                async with self._supervisor.idling:
-                    await self._supervisor.idling.wait()
+            async def cont() -> None:
+                with suppress_and_log(), timeit("IDLE :: TMUX"):
+                    await self._periodical()
 
-    async def work(self, context: Context) -> AsyncIterator[Completion]:
+            await self._with_interrupt(cont())
+            async with self._idle:
+                await self._idle.wait()
+
+    async def _periodical(self) -> None:
+        if not self._lock.locked():
+            async with self._lock:
+                current, panes = await snapshot(
+                    self._exec, all_sessions=self._options.all_sessions
+                )
+                self._db.periodical(current, panes=panes)
+
+    async def periodical(self) -> None:
+        await self._ex.submit(self._periodical())
+
+    async def _work(self, context: Context) -> AsyncIterator[Completion]:
         async with self._work_lock:
-            words = await self._misc.select(
+            words = self._db.select(
                 self._supervisor.match,
                 word=context.words,
                 sym=(context.syms if self._options.match_syms else ""),

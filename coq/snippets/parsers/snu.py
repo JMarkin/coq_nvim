@@ -2,17 +2,17 @@ from string import ascii_letters, ascii_lowercase, digits
 from typing import AbstractSet, MutableSequence, Optional
 
 from ...shared.types import Context
-from .parser import context_from, next_char, pushback_chars, raise_err, token_parser
+from .lexer import context_from, next_char, pushback_chars, raise_err, token_parser
 from .types import (
-    Begin,
-    DummyBegin,
     End,
+    IntBegin,
     Parsed,
     ParseInfo,
     ParserCtx,
     Token,
     TokenStream,
     Unparsed,
+    VarBegin,
 )
 
 """
@@ -37,7 +37,7 @@ _LANG_BEGIN_CHARS = {*ascii_lowercase}
 _REGEX_FLAG_CHARS = {*ascii_lowercase}
 
 
-def _parse_escape(context: ParserCtx, *, escapable_chars: AbstractSet[str]) -> str:
+def _lex_escape(context: ParserCtx, *, escapable_chars: AbstractSet[str]) -> str:
     pos, char = next_char(context)
     assert char == "\\"
 
@@ -50,7 +50,7 @@ def _parse_escape(context: ParserCtx, *, escapable_chars: AbstractSet[str]) -> s
 
 
 # regexreplace ::= '/' text '/' text '/' [a-z]*
-def _parse_decorated(context: ParserCtx) -> TokenStream:
+def _lex_decorated(context: ParserCtx) -> TokenStream:
     pos, char = next_char(context)
     assert char == "/"
 
@@ -59,7 +59,7 @@ def _parse_decorated(context: ParserCtx) -> TokenStream:
     for pos, char in context:
         if char == "\\":
             pushback_chars(context, (pos, char))
-            char = _parse_escape(context, escapable_chars=_REGEX_ESCAPABLE_CHARS)
+            char = _lex_escape(context, escapable_chars=_REGEX_ESCAPABLE_CHARS)
             decoration_acc.append(char)
         elif char == "/":
             seen += 1
@@ -85,20 +85,21 @@ def _parse_decorated(context: ParserCtx) -> TokenStream:
 
 # tabstop      ::= '$' int | '${' int '}'
 # placeholder  ::= '${' int ':' ('#:'? any | regexreplace) '}'
-def _parse_tp(context: ParserCtx) -> TokenStream:
+def _lex_tp(context: ParserCtx) -> TokenStream:
     idx_acc: MutableSequence[str] = []
 
     for pos, char in context:
         if char in _INT_CHARS:
             idx_acc.append(char)
         else:
-            yield Begin(idx=int("".join(idx_acc)))
+            idx = int("".join(idx_acc))
+            yield IntBegin(idx=idx)
             if char == "}":
                 # tabstop     ::= '$' int | '${' int '}'
                 yield End()
                 break
             elif char == ":":
-                context.state.depth += 1
+                context.stack.append(idx)
                 (p1, c1), (p2, c2) = next_char(context), next_char(context)
                 # placeholder  ::= '${' int ':' ('#:'? any | regexreplace) '}'
                 if c1 == "#" and c2 == ":":
@@ -108,7 +109,7 @@ def _parse_tp(context: ParserCtx) -> TokenStream:
                 break
             elif char == "/":
                 pushback_chars(context, (pos, char))
-                yield from _parse_decorated(context)
+                yield from _lex_decorated(context)
                 yield End()
                 break
             else:
@@ -129,7 +130,7 @@ def _variable_substitution(context: ParserCtx, *, name: str) -> Optional[str]:
 
 
 # variable    ::= '${' var '}' | '${' var ':' any '}'
-def _parse_variable(context: ParserCtx) -> TokenStream:
+def _lex_variable(context: ParserCtx) -> TokenStream:
     name_acc: MutableSequence[str] = []
 
     for pos, char in context:
@@ -143,18 +144,18 @@ def _parse_variable(context: ParserCtx) -> TokenStream:
             var = _variable_substitution(context, name=name)
             if var is not None:
                 yield var
-                context.state.depth += 1
-                yield from _parse(context, shallow=True)
+                context.stack.append(name)
+                yield from _lex(context, shallow=True)
             else:
-                yield DummyBegin()
-                context.state.depth += 1
+                yield VarBegin(name=name)
+                context.stack.append(name)
             break
         else:
             name_acc.append(char)
 
 
 # ${...}
-def _parse_inner_scope(context: ParserCtx) -> TokenStream:
+def _lex_inner_scope(context: ParserCtx) -> TokenStream:
     pos, char = next_char(context)
     assert char == "{"
 
@@ -162,11 +163,11 @@ def _parse_inner_scope(context: ParserCtx) -> TokenStream:
     if char in _INT_CHARS:
         # tabstop | placeholder
         pushback_chars(context, (pos, char))
-        yield from _parse_tp(context)
+        yield from _lex_tp(context)
     elif char in _VAR_BEGIN_CHARS:
         # variable
         pushback_chars(context, (pos, char))
-        yield from _parse_variable(context)
+        yield from _lex_variable(context)
     else:
         raise_err(
             text=context.text,
@@ -178,14 +179,14 @@ def _parse_inner_scope(context: ParserCtx) -> TokenStream:
 
 
 # $...
-def _parse_scope(context: ParserCtx) -> TokenStream:
+def _lex_scope(context: ParserCtx) -> TokenStream:
     pos, char = next_char(context)
     assert char == "$"
 
     pos, char = next_char(context)
     if char == "{":
         pushback_chars(context, (pos, char))
-        yield from _parse_inner_scope(context)
+        yield from _lex_inner_scope(context)
     elif char in _INT_CHARS:
         idx_acc = [char]
         # tabstop     ::= '$' int
@@ -193,7 +194,7 @@ def _parse_scope(context: ParserCtx) -> TokenStream:
             if char in _INT_CHARS:
                 idx_acc.append(char)
             else:
-                yield Begin(idx=int("".join(idx_acc)))
+                yield IntBegin(idx=int("".join(idx_acc)))
                 yield End()
                 pushback_chars(context, (pos, char))
                 break
@@ -202,7 +203,7 @@ def _parse_scope(context: ParserCtx) -> TokenStream:
 
 
 # lang         ::= '`' text  '`' | '`!' [a-z] text '`'
-def _parse_lang(context: ParserCtx) -> Token:
+def _lex_lang(context: ParserCtx) -> Token:
     pos, char = next_char(context)
     assert char == "`"
 
@@ -210,7 +211,7 @@ def _parse_lang(context: ParserCtx) -> Token:
     for pos, char in context:
         if char == "\\":
             pushback_chars(context, (pos, char))
-            esc = _parse_escape(context, escapable_chars=_ESCAPABLE_CHARS)
+            esc = _lex_escape(context, escapable_chars=_ESCAPABLE_CHARS)
             acc.append(esc)
         elif char == "`":
             return Unparsed(text=f"`{''.join(acc)}`")
@@ -221,28 +222,28 @@ def _parse_lang(context: ParserCtx) -> Token:
 
 
 # any          ::= tabstop | variable | placeholder | text
-def _parse(context: ParserCtx, shallow: bool) -> TokenStream:
+def _lex(context: ParserCtx, shallow: bool) -> TokenStream:
     for pos, char in context:
         if char == "\\":
             pushback_chars(context, (pos, char))
-            yield _parse_escape(context, escapable_chars=_ESCAPABLE_CHARS)
-        elif context.state.depth and char == "}":
+            yield _lex_escape(context, escapable_chars=_ESCAPABLE_CHARS)
+        elif context.stack and char == "}":
             yield End()
-            context.state.depth -= 1
+            context.stack.pop()
             if shallow:
                 break
         elif char == "$":
             pushback_chars(context, (pos, char))
-            yield from _parse_scope(context)
+            yield from _lex_scope(context)
         elif char == "`":
             pushback_chars(context, (pos, char))
-            yield _parse_lang(context)
+            yield _lex_lang(context)
         else:
             yield char
 
 
 def tokenizer(context: Context, info: ParseInfo, snippet: str) -> Parsed:
     ctx = context_from(snippet, context=context, info=info)
-    tokens = _parse(ctx, shallow=False)
+    tokens = _lex(ctx, shallow=False)
     parsed = token_parser(ctx, stream=tokens)
     return parsed

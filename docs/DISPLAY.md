@@ -138,6 +138,14 @@ For item `<source>` show `「<source>」`, purely for aesthetics.
 
 Used for the preview window.
 
+##### `coq_settings.display.preview.enabled`
+
+**default:**
+
+```json
+true
+```
+
 ##### `coq_settings.display.preview.x_max_len`
 
 Maximum width.
@@ -270,3 +278,17 @@ For a (mostly exhaustive) list of `kind` keys: `:lua print(vim.inspect(vim.lsp.p
 For `ctags` do `ctags --list-kinds-full`.
 
 The defaults do not cover `ctags`, as there are too many to find unique icons for.
+
+#### coq_settings.display.statusline
+
+Used for the statusline.
+
+##### `coq_settings.display.statusline.helo`
+
+Displays a greeting in the statusline.
+
+**default:**
+
+```json
+true
+```

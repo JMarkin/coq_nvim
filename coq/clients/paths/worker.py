@@ -19,6 +19,7 @@ from std2.platform import OS, os
 from std2.string import removesuffix
 
 from ...shared.context import cword_before
+from ...shared.executor import AsyncExecutor
 from ...shared.fuzzy import quick_ratio
 from ...shared.parse import lower
 from ...shared.runtime import Supervisor
@@ -30,6 +31,12 @@ from ...shared.types import Completion, Context, Edit, ExternPath
 _DRIVE_LETTERS = {*ascii_letters}
 _SH_VAR_CHARS = {*ascii_letters, *digits, "_"}
 _SEP_CHARS = sep + altsep if altsep else sep
+
+# if os is OS.windows:
+#     _USERS = ()
+# else:
+#     from pwd import getpwall
+#     _USERS = {p.pw_name for p in getpwall()}
 
 
 def p_lhs(os: OS, lhs: str) -> str:
@@ -122,44 +129,47 @@ def parse(
 ) -> Iterator[Tuple[Path, bool, str]]:
     for segment, s0 in _iter_segs(seps, line=line):
         local_sep = _p_sep(s0)
-        p = Path(s0)
-        entire = p if p.is_absolute() else base / p
+        if not {*s0}.issubset({sep, altsep}):
+            p = Path(s0)
+            entire = p if p.is_absolute() else base / p
 
-        with suppress(OSError):
-            if entire.is_dir():
-                for path in scandir(entire):
-                    is_dir = path.is_dir()
-                    term = local_sep if is_dir else ""
-                    line = _join(local_sep, lhs=segment, rhs=path.name) + term
-                    yield Path(path.path), is_dir, line
-                return
+            with suppress(OSError):
+                if entire.is_dir():
+                    for path in scandir(entire):
+                        is_dir = path.is_dir()
+                        term = local_sep if is_dir else ""
+                        line = _join(local_sep, lhs=segment, rhs=path.name) + term
+                        yield Path(path.path), is_dir, line
+                    return
 
-            else:
-                lft, go, rhs = s0.rpartition(local_sep)
-                if go:
-                    lp, sp, _ = segment.rpartition(local_sep)
-                    lseg = lp + sp
+                else:
+                    lft, go, rhs = s0.rpartition(local_sep)
+                    if go:
+                        lp, sp, _ = segment.rpartition(local_sep)
+                        lseg = lp + sp
 
-                    lhs = lft + go
-                    p = Path(lhs)
-                    left = p if p.is_absolute() else base / p
-                    if left.is_dir():
-                        for path in scandir(left):
-                            ratio = quick_ratio(
-                                lower(rhs),
-                                lower(path.name),
-                                look_ahead=look_ahead,
-                            )
-                            if (
-                                ratio >= fuzzy_cutoff
-                                and len(path.name) + look_ahead >= len(rhs)
-                                and not rhs.startswith(path.name)
-                            ):
-                                is_dir = path.is_dir()
-                                term = local_sep if is_dir else ""
-                                line = _join(local_sep, lhs=lseg, rhs=path.name) + term
-                                yield Path(path.path), is_dir, line
-                        return
+                        lhs = lft + go
+                        p = Path(lhs)
+                        left = p if p.is_absolute() else base / p
+                        if left.is_dir():
+                            for path in scandir(left):
+                                ratio = quick_ratio(
+                                    lower(rhs),
+                                    lower(path.name),
+                                    look_ahead=look_ahead,
+                                )
+                                if (
+                                    ratio >= fuzzy_cutoff
+                                    and len(path.name) + look_ahead >= len(rhs)
+                                    and not rhs.startswith(path.name)
+                                ):
+                                    is_dir = path.is_dir()
+                                    term = local_sep if is_dir else ""
+                                    line = (
+                                        _join(local_sep, lhs=lseg, rhs=path.name) + term
+                                    )
+                                    yield Path(path.path), is_dir, line
+                            return
 
 
 async def _parse(
@@ -202,13 +212,20 @@ def _sort_by(unifying_chars: AbstractSet[str], context: Context, new_text: str) 
 
 class Worker(BaseWorker[PathsClient, None]):
     def __init__(
-        self, supervisor: Supervisor, options: PathsClient, misc: None
+        self,
+        ex: AsyncExecutor,
+        supervisor: Supervisor,
+        options: PathsClient,
+        misc: None,
     ) -> None:
-        super().__init__(supervisor, options=options, misc=misc)
+        super().__init__(ex, supervisor=supervisor, options=options, misc=misc)
         seps = {sep, altsep} if altsep else {sep}
         self._seps = {sep for sep in options.path_seps if sep in seps} or seps
 
-    async def work(self, context: Context) -> AsyncIterator[Completion]:
+    def interrupt(self) -> None:
+        pass
+
+    async def _work(self, context: Context) -> AsyncIterator[Completion]:
         async with self._work_lock:
             line = context.line_before + context.words_after
 

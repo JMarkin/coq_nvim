@@ -1,10 +1,11 @@
-from concurrent.futures import Executor
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path, PurePath
 from shutil import which
-from typing import Iterator, Mapping, cast
+from typing import Any, Iterator, Mapping, cast
 
-from pynvim import Nvim
-from pynvim_pp.api import get_cwd
+from pynvim_pp.lib import decode
+from pynvim_pp.nvim import Nvim
+from pynvim_pp.types import NoneType
 from std2.configparser import hydrate
 from std2.graphlib import merge
 from std2.pickle.decoder import new_decoder
@@ -13,6 +14,7 @@ from yaml import safe_load
 from ..clients.buffers.worker import Worker as BuffersWorker
 from ..clients.lsp.worker import Worker as LspWorker
 from ..clients.paths.worker import Worker as PathsWorker
+from ..clients.registers.worker import Worker as RegistersWorker
 from ..clients.snippet.worker import Worker as SnippetWorker
 from ..clients.t9.worker import Worker as T9Worker
 from ..clients.tags.worker import Worker as TagsWorker
@@ -20,12 +22,7 @@ from ..clients.third_party.worker import Worker as ThirdPartyWorker
 from ..clients.tmux.worker import Worker as TmuxWorker
 from ..clients.tree_sitter.worker import Worker as TreeWorker
 from ..consts import CONFIG_YML, SETTINGS_VAR, VARS
-from ..databases.buffers.database import BDB
 from ..databases.insertions.database import IDB
-from ..databases.snippets.database import SDB
-from ..databases.tags.database import CTDB
-from ..databases.tmux.database import TMDB
-from ..databases.treesitter.database import TDB
 from ..shared.lru import LRU
 from ..shared.runtime import Supervisor, Worker
 from ..shared.settings import LSPClient, Settings
@@ -34,9 +31,9 @@ from .rt_types import Stack, ValidationError
 from .state import state
 
 
-def _settings(nvim: Nvim) -> Settings:
-    yml = safe_load(CONFIG_YML.read_text("UTF-8"))
-    user_config = nvim.vars.get(SETTINGS_VAR, {})
+async def _settings() -> Settings:
+    yml = safe_load(decode(CONFIG_YML.read_bytes()))
+    user_config = cast(Any, (await Nvim.vars.get(NoneType, SETTINGS_VAR)) or {})
     u_conf = hydrate(user_config)
 
     if isinstance(u_conf, Mapping):
@@ -59,67 +56,64 @@ def _settings(nvim: Nvim) -> Settings:
 
 def _from_each_according_to_their_ability(
     settings: Settings,
-    bdb: BDB,
-    sdb: SDB,
-    tdb: TDB,
-    ctdb: CTDB,
-    tmdb: TMDB,
+    vars_dir: Path,
+    cwd: PurePath,
     supervisor: Supervisor,
 ) -> Iterator[Worker]:
     clients = settings.clients
 
     if clients.buffers.enabled:
-        yield BuffersWorker(supervisor, options=clients.buffers, misc=bdb)
+        yield BuffersWorker.init(supervisor, options=clients.buffers, misc=None)
 
     if clients.paths.enabled:
-        yield PathsWorker(supervisor, options=clients.paths, misc=None)
+        yield PathsWorker.init(supervisor, options=clients.paths, misc=None)
 
     if clients.tree_sitter.enabled:
-        yield TreeWorker(supervisor, options=clients.tree_sitter, misc=tdb)
+        yield TreeWorker.init(supervisor, options=clients.tree_sitter, misc=None)
 
     if clients.lsp.enabled:
-        yield LspWorker(supervisor, options=clients.lsp, misc=None)
+        yield LspWorker.init(supervisor, options=clients.lsp, misc=None)
+
+    if clients.registers.enabled:
+        yield RegistersWorker.init(supervisor, options=clients.registers, misc=None)
 
     if clients.third_party.enabled:
-        yield ThirdPartyWorker(
+        yield ThirdPartyWorker.init(
             supervisor, options=cast(LSPClient, clients.third_party), misc=None
         )
 
     if clients.snippets.enabled:
-        yield SnippetWorker(supervisor, options=clients.snippets, misc=sdb)
+        yield SnippetWorker.init(supervisor, options=clients.snippets, misc=vars_dir)
 
     if clients.tags.enabled and (ctags := which("ctags")):
-        yield TagsWorker(supervisor, options=clients.tags, misc=(ctdb, Path(ctags)))
+        yield TagsWorker.init(
+            supervisor, options=clients.tags, misc=(Path(ctags), vars_dir, cwd)
+        )
 
-    if clients.tmux.enabled:
-        yield TmuxWorker(supervisor, options=clients.tmux, misc=tmdb)
+    if clients.tmux.enabled and (tmux := which("tmux")):
+        yield TmuxWorker.init(supervisor, options=clients.tmux, misc=Path(tmux))
 
     if clients.tabnine.enabled:
-        yield T9Worker(supervisor, options=clients.tabnine, misc=None)
+        yield T9Worker.init(supervisor, options=clients.tabnine, misc=None)
 
 
-def stack(pool: Executor, nvim: Nvim) -> Stack:
-    settings = _settings(nvim)
-    pum_width = nvim.options["pumwidth"]
-    vars_dir = Path(nvim.funcs.stdpath("cache")) / "coq" if settings.xdg else VARS
-    s = state(cwd=get_cwd(nvim), pum_width=pum_width)
-    bdb, sdb, idb, tdb, ctdb, tmdb = (
-        BDB(pool),
-        SDB(pool, vars_dir=vars_dir),
-        IDB(pool),
-        TDB(pool),
-        CTDB(pool, vars_dir=vars_dir, cwd=s.cwd),
-        TMDB(pool),
+async def stack(th: ThreadPoolExecutor) -> Stack:
+    settings = await _settings()
+    pum_width = await Nvim.opts.get(int, "pumwidth")
+    vars_dir = (
+        Path(await Nvim.fn.stdpath(str, "cache")) / "coq" if settings.xdg else VARS
     )
+    s = state(cwd=await Nvim.getcwd(), pum_width=pum_width)
+    idb = IDB()
     reviewer = Reviewer(
         icons=settings.display.icons,
         options=settings.match,
         db=idb,
     )
     supervisor = Supervisor(
-        pool=pool,
-        nvim=nvim,
+        th=th,
         vars_dir=vars_dir,
+        display=settings.display,
         match=settings.match,
         comp=settings.completion,
         limits=settings.limits,
@@ -128,11 +122,8 @@ def stack(pool: Executor, nvim: Nvim) -> Stack:
     workers = {
         *_from_each_according_to_their_ability(
             settings,
-            bdb=bdb,
-            sdb=sdb,
-            tdb=tdb,
-            ctdb=ctdb,
-            tmdb=tmdb,
+            vars_dir=vars_dir,
+            cwd=s.cwd,
             supervisor=supervisor,
         )
     }
@@ -140,12 +131,7 @@ def stack(pool: Executor, nvim: Nvim) -> Stack:
         settings=settings,
         lru=LRU(size=settings.match.max_results),
         metrics={},
-        bdb=bdb,
-        sdb=sdb,
         idb=idb,
-        tdb=tdb,
-        ctdb=ctdb,
-        tmdb=tmdb,
         supervisor=supervisor,
         workers=workers,
     )

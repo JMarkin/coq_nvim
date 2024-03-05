@@ -1,7 +1,8 @@
 from os import environ, name
+from os.path import normpath
 from pathlib import Path
 
-GIL_SWITCH = 1 / (10 ** 3)
+GIL_SWITCH = 1 / (10**3)
 
 IS_WIN = name == "nt"
 
@@ -26,7 +27,6 @@ COMPILATION_YML = _CONF_DIR / "compilation.yml"
 
 _ART_DIR = TOP_LEVEL / "artifacts"
 HELO_ARTIFACTS = _ART_DIR / "helo.yml"
-LSP_ARTIFACTS = _ART_DIR / "lsp.json"
 
 
 TMP_DIR = VARS / "tmp"
@@ -40,10 +40,11 @@ DEBUG = "COQ_DEBUG" in environ
 DEBUG_METRICS = "COQ_DEBUG_METRICS" in environ
 DEBUG_DB = "COQ_DEBUG_DB" in environ
 
-BUFFER_DB = str(TMP_DIR / "buffers.sqlite3") if DEBUG_DB else ":memory:"
-TREESITTER_DB = str(TMP_DIR / "treesitter.sqlite3") if DEBUG_DB else ":memory:"
-INSERT_DB = str(TMP_DIR / "inserts.sqlite3") if DEBUG_DB else ":memory:"
-TMUX_DB = str(TMP_DIR / "tmux.sqlite3") if DEBUG_DB else ":memory:"
+BUFFER_DB = normpath(TMP_DIR / "buffers.sqlite3") if DEBUG_DB else ":memory:"
+TREESITTER_DB = normpath(TMP_DIR / "treesitter.sqlite3") if DEBUG_DB else ":memory:"
+INSERT_DB = normpath(TMP_DIR / "inserts.sqlite3") if DEBUG_DB else ":memory:"
+TMUX_DB = normpath(TMP_DIR / "tmux.sqlite3") if DEBUG_DB else ":memory:"
+REGISTER_DB = normpath(TMP_DIR / "register.sqlite3") if DEBUG_DB else ":memory:"
 
 
 _URI_BASE = "https://github.com/ms-jpq/coq_nvim/tree/coq/docs/"

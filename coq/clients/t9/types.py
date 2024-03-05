@@ -4,6 +4,7 @@ from typing import Any, Optional, Sequence, TypedDict
 
 @dataclass(frozen=True)
 class ReqL2:
+    correlation_id: int
     before: str
     after: str
     filename: str
@@ -32,5 +33,8 @@ class RespL1:
 
 
 class Response(TypedDict):
+    correlation_id: int
     old_prefix: str
+    is_locked: bool
+    user_message: Sequence[str]
     results: Sequence[Any]

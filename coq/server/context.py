@@ -1,28 +1,26 @@
-from difflib import unified_diff
-from os import linesep
 from os.path import normcase
-from typing import Literal, Tuple, cast
+from typing import Optional, Tuple, cast
 
-from pynvim import Nvim
-from pynvim.api import Buffer
-from pynvim_pp.api import LFfmt, buf_get_lines
 from pynvim_pp.atomic import Atomic
+from pynvim_pp.buffer import Buffer, linefeed
 from pynvim_pp.lib import decode, encode
+from pynvim_pp.nvim import Nvim
 from pynvim_pp.text_object import gen_split
+from pynvim_pp.types import NoneType
 
 from ..consts import DEBUG
-from ..databases.buffers.database import BDB
 from ..shared.parse import lower
 from ..shared.settings import MatchOptions
-from ..shared.types import Context
+from ..shared.types import UTF16, UTF32, ChangeEvent, Context
 from .state import State
 
 
-def context(
-    nvim: Nvim, db: BDB, options: MatchOptions, state: State, manual: bool
+async def context(
+    options: MatchOptions, state: State, change: Optional[ChangeEvent], manual: bool
 ) -> Context:
     with Atomic() as (atomic, ns):
         ns.scr_col = atomic.call_function("screencol", ())
+        ns.win_height = atomic.win_get_height(0)
         ns.buf = atomic.get_current_buf()
         ns.name = atomic.buf_get_name(0)
         ns.line_count = atomic.buf_line_count(0)
@@ -32,39 +30,25 @@ def context(
         ns.tabstop = atomic.buf_get_option(0, "tabstop")
         ns.expandtab = atomic.buf_get_option(0, "expandtab")
         ns.cursor = atomic.win_get_cursor(0)
-        atomic.commit(nvim)
+        await atomic.commit(NoneType)
 
-    scr_col = ns.scr_col
-    buf = cast(Buffer, ns.buf)
-    (r, col) = cast(Tuple[int, int], ns.cursor)
+    scr_col = ns.scr_col(int)
+    win_size = ns.win_height(int) // 2
+    buf = ns.buf(Buffer)
+    (r, col) = cast(Tuple[int, int], ns.cursor(NoneType))
     row = r - 1
     pos = (row, col)
-    buf_line_count = ns.line_count
-    filename = normcase(cast(str, ns.name))
-    filetype = cast(str, ns.filetype)
-    comment_str = cast(str, ns.commentstring)
-    tabstop = ns.tabstop
-    expandtab = cast(bool, ns.expandtab)
-    linefeed = cast(Literal["\n", "\r", "\r\n"], LFfmt[cast(str, ns.fileformat)].value)
+    buf_line_count = ns.line_count(int)
+    filename = normcase(ns.name(str))
+    filetype = ns.filetype(str)
+    comment_str = ns.commentstring(str)
+    tabstop = ns.tabstop(int)
+    expandtab = ns.expandtab(bool)
+    linesep = linefeed(ns.fileformat(str))
 
-    lo = max(0, row - options.proximate_lines)
-    hi = min(buf_line_count, row + options.proximate_lines + 1)
-    lines = buf_get_lines(nvim, buf=buf, lo=lo, hi=hi)
-    if DEBUG:
-        db_line_count, db_lit = db.lines(buf.number, lo=lo, hi=hi)
-        db_lines = tuple(db_lit)
-        assert db_line_count in {
-            buf_line_count - 1,
-            buf_line_count,
-            buf_line_count + 1,
-        }, (db_line_count, buf_line_count)
-        assert tuple(
-            "" if idx == row else line for idx, line in enumerate(db_lines, start=lo)
-        ) == tuple(
-            "" if idx == row else line for idx, line in enumerate(lines, start=lo)
-        ), linesep.join(
-            unified_diff(lines, db_lines)
-        )
+    lo = max(0, row - win_size)
+    hi = min(buf_line_count, row + win_size + 1)
+    lines = await buf.get_lines(lo=lo, hi=hi)
 
     r = row - lo
     line = lines[r]
@@ -72,12 +56,27 @@ def context(
 
     lhs, _, rhs = comment_str.partition("%s")
     b_line = encode(line)
-    before, after = decode(b_line[:col]), decode(b_line[col:])
-    split = gen_split(lhs=before, rhs=after, unifying_chars=options.unifying_chars)
+    line_before, line_after = decode(b_line[:col]), decode(b_line[col:])
+    utf16_col = len(encode(line_before, encoding=UTF16)) // 2
+    utf32_col = len(encode(line_before, encoding=UTF32)) // 4
 
+    split = gen_split(
+        lhs=line_before, rhs=line_after, unifying_chars=options.unifying_chars
+    )
     l_words_before, l_words_after = lower(split.word_lhs), lower(split.word_rhs)
     l_syms_before, l_syms_after = lower(split.syms_lhs), lower(split.syms_rhs)
     is_lower = l_words_before + l_words_after == split.word_lhs + split.word_rhs
+
+    if DEBUG:
+        u32, u16 = cast(
+            Tuple[int, int],
+            await Nvim.api.exec_lua(
+                NoneType, "return {vim.str_utfindex(...)}", (line, col)
+            ),
+        )
+        assert utf16_col == u16
+        assert utf32_col == u32
+
     ctx = Context(
         manual=manual,
         change_id=state.change_id,
@@ -87,15 +86,17 @@ def context(
         filename=filename,
         filetype=filetype,
         line_count=buf_line_count,
-        linefeed=linefeed,
+        linefeed=linesep,
         tabstop=tabstop,
         expandtab=expandtab,
         comment=(lhs, rhs),
         position=pos,
+        cursor=(row, col, utf16_col, utf32_col),
         scr_col=scr_col,
+        win_size=win_size,
         line=split.lhs + split.rhs,
-        line_before=split.lhs,
-        line_after=split.rhs,
+        line_before=line_before,
+        line_after=line_after,
         lines=lines,
         lines_before=lines_before,
         lines_after=lines_after,
@@ -112,5 +113,6 @@ def context(
         l_syms_before=l_syms_before,
         l_syms_after=l_syms_after,
         is_lower=is_lower,
+        change=change,
     )
     return ctx

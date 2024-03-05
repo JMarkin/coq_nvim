@@ -172,16 +172,6 @@ Try to preview this many lines.
 
 #### coq_settings.clients.tree_sitter
 
-##### `coq_settings.clients.tree_sitter.search_context`
-
-Only query this many lines about the cursor
-
-**default:**
-
-```json
-333
-```
-
 ##### `coq_settings.clients.tree_sitter.slow_threshold`
 
 Send out a warning if treesitter is slower than this
@@ -224,6 +214,56 @@ Restrict matching to buffers of the same filetype
 
 ```json
 false
+```
+
+---
+
+#### coq_settings.clients.registers
+
+##### `coq_settings.clients.registers.match_syms`
+
+Also match symbols in addition to words.
+
+**default:**
+
+```json
+false
+```
+
+##### `coq_settings.clients.registers.max_yank_size`
+
+For the yank register: `0`. Ignore contents if size exceeds limit.
+
+**default:**
+
+```json
+8888
+```
+
+##### `coq_settings.clients.registers.words`
+
+Complete from contents of registers.
+
+`0` is the "last yank" register.
+
+Can also take in named registers `a-z`.
+
+**default:**
+
+```json
+["0"]
+```
+
+##### `coq_settings.clients.registers.lines`
+
+Complete lines from contents of registers `a-z`.
+
+Will only match at beginning of lines.
+
+**default:**
+
+```json
+[]
 ```
 
 ---

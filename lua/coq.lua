@@ -50,13 +50,13 @@ local main = function(is_xdg)
       "/.vars/runtime/bin/python3")
 
   if is_win then
-    local v_py_xdg = xdg_dir .. "/coqrt/Scripts/python"
+    local v_py_xdg = xdg_dir .. "/coqrt/Scripts/python.exe"
     local v_py = is_xdg and v_py_xdg or v_py
     if vim.fn.filereadable(v_py) == 1 then
       return {v_py}
     else
-      local win_proxy = cwd .. [[/venv.bat]]
-      return {win_proxy, py3}
+      -- local win_proxy = cwd .. [[/venv.cmd]]
+      return {py3}
     end
   else
     local v_py_xdg = xdg_dir .. "/coqrt/bin/python3"
@@ -74,19 +74,37 @@ local start = function(deps, ...)
   local args =
     vim.tbl_flatten {
     deps and py3 or main(is_xdg),
-    {"-m", "coq"},
+    {"-s", "-u", "-m", "coq"},
     {...},
     (is_xdg and {"--xdg", xdg_dir} or {})
   }
 
   local params = {
     cwd = cwd,
+    env = {PYTHONSAFEPATH = "1", PYTHONPATH = cwd},
     on_exit = on_exit,
-    on_stdout = on_stdout,
-    on_stderr = on_stderr
+    on_stdout = (function()
+      if deps then
+        return nil
+      else
+        return on_stdout
+      end
+    end)(),
+    on_stderr = (function()
+      if deps then
+        return nil
+      else
+        return on_stderr
+      end
+    end)()
   }
-  job_id = vim.fn.jobstart(args, params)
-  return job_id
+  if deps then
+    vim.api.nvim_command [[new]]
+    vim.fn.termopen(args, params)
+  else
+    job_id = vim.fn.jobstart(args, params)
+    return job_id
+  end
 end
 
 coq.deps = function()
@@ -99,8 +117,12 @@ local set_coq_call = function(cmd)
   coq[cmd] = function(...)
     local args = {...}
 
+    local srv = is_win and {"localhost:0"} or {}
+    local server = vim.fn.serverstart(unpack(srv))
+
     if not job_id then
-      job_id = start(false, "run", "--socket", vim.fn.serverstart())
+      job_id =
+        start(false, "run", "--ppid", vim.fn.getpid(), "--socket", server)
     end
 
     if not err_exit and COQ[cmd] then
@@ -145,7 +167,6 @@ coq.lsp_ensure_capabilities = function(cfg)
             insertReplaceSupport = true,
             insertTextModeSupport = {valueSet = {1, 2}},
             labelDetailsSupport = true,
-            labelDetailsSupport = true,
             preselectSupport = true,
             resolveSupport = {properties = {}},
             snippetSupport = true,
@@ -166,6 +187,10 @@ if settings.auto_start then
   local args = settings.auto_start == "shut-up" and {"--shut-up"} or {}
   coq.Now(unpack(args))
 end
+
+require("coq.lsp-request")
+require("coq.ts-request")
+require("coq.completion")
 
 return setmetatable(
   coq,

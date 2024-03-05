@@ -1,12 +1,13 @@
 from dataclasses import dataclass
 from itertools import accumulate
 from pprint import pformat
-from typing import AbstractSet, Callable, Iterable, Iterator, Sequence, Tuple
+from typing import Callable, Iterable, Iterator, Sequence, Tuple
 
 from pynvim_pp.lib import encode
 from std2.string import removesuffix
 from std2.types import never
 
+from ..shared.settings import CompleteOptions, MatchOptions
 from ..shared.trans import indent_adjusted, trans_adjusted
 from ..shared.types import (
     BaseRangeEdit,
@@ -18,6 +19,7 @@ from ..shared.types import (
     SnippetEdit,
     SnippetGrammar,
     SnippetRangeEdit,
+    TextTransforms,
 )
 from .consts import SNIP_LINE_SEP
 from .parsers.lsp import tokenizer as lsp_tokenizer
@@ -31,6 +33,10 @@ class ParsedEdit(BaseRangeEdit):
 
 
 _NL = len(encode(SNIP_LINE_SEP))
+
+
+def requires_snip(text: str) -> bool:
+    return "$" in text
 
 
 def _marks(
@@ -79,7 +85,11 @@ def _marks(
 
 
 def _parser(grammar: SnippetGrammar) -> Callable[[Context, ParseInfo, str], Parsed]:
-    if grammar is SnippetGrammar.lsp:
+    if grammar is SnippetGrammar.lit:
+        return lambda _, __, text: Parsed(
+            text=text, cursor=len(text), regions=(), xforms={}
+        )
+    elif grammar is SnippetGrammar.lsp:
         return lsp_tokenizer
     elif grammar is SnippetGrammar.snu:
         return snu_tokenizer
@@ -93,7 +103,7 @@ def parse_ranged(
     snippet: SnippetRangeEdit,
     info: ParseInfo,
     line_before: str,
-) -> Tuple[Edit, Sequence[Mark]]:
+) -> Tuple[Edit, Sequence[Mark], TextTransforms]:
     parser = _parser(snippet.grammar)
     indented = (
         SNIP_LINE_SEP.join(
@@ -114,6 +124,7 @@ def parse_ranged(
         new_text=new_text,
         begin=snippet.begin,
         end=snippet.end,
+        cursor_pos=snippet.cursor_pos,
         encoding=snippet.encoding,
         new_prefix=new_prefix,
     )
@@ -124,26 +135,21 @@ def parse_ranged(
         new_lines=new_lines,
         regions=parsed.regions,
     )
-    return edit, marks
+    return edit, marks, parsed.xforms
 
 
 def parse_basic(
-    unifying_chars: AbstractSet[str],
-    replace_prefix_threshold: int,
+    match: MatchOptions,
+    comp: CompleteOptions,
     adjust_indent: bool,
     context: Context,
     snippet: SnippetEdit,
     info: ParseInfo,
-) -> Tuple[Edit, Sequence[Mark]]:
+) -> Tuple[Edit, Sequence[Mark], TextTransforms]:
     parser = _parser(snippet.grammar)
 
     sort_by = parser(context, info, snippet.new_text).text
-    trans_ctx = trans_adjusted(
-        unifying_chars,
-        replace_prefix_threshold=replace_prefix_threshold,
-        ctx=context,
-        new_text=sort_by,
-    )
+    trans_ctx = trans_adjusted(match, comp=comp, ctx=context, new_text=sort_by)
     old_prefix, old_suffix = trans_ctx.old_prefix, trans_ctx.old_suffix
 
     line_before = removesuffix(context.line_before, suffix=old_prefix)
@@ -175,4 +181,4 @@ def parse_basic(
         new_lines=new_lines,
         regions=parsed.regions,
     )
-    return edit, marks
+    return edit, marks, parsed.xforms

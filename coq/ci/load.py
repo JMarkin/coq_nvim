@@ -14,13 +14,13 @@ from yaml import safe_load
 
 from ..consts import COMPILATION_YML, TMP_DIR
 from ..shared.context import EMPTY_CONTEXT
+from ..shared.settings import EMPTY_COMP, EMPTY_MATCH
 from ..shared.types import SnippetEdit
-from ..snippets.loaders.load import LoadedSnips
 from ..snippets.loaders.load import load_ci as load_from_paths
 from ..snippets.parse import parse_basic
-from ..snippets.parsers.parser import ParseError
-from ..snippets.parsers.types import ParseInfo
-from ..snippets.types import ParsedSnippet
+from ..snippets.parsers.types import ParseError, ParseInfo
+from ..snippets.types import LoadedSnips, ParsedSnippet
+from .snip_trans import trans
 from .types import Compilation
 
 
@@ -64,6 +64,7 @@ async def load() -> LoadedSnips:
     await gather(*(_git_pull(sem, uri=uri) for uri in specs.git))
 
     parsed = load_from_paths(
+        trans,
         lsp=(TMP_DIR / path for path in specs.paths.lsp),
         neosnippet=(TMP_DIR / path for path in specs.paths.neosnippet),
         ultisnip=(TMP_DIR / path for path in specs.paths.ultisnip),
@@ -94,8 +95,8 @@ async def load_parsable() -> Any:
             )
             with suppress(ParseError):
                 parse_basic(
-                    set(),
-                    replace_prefix_threshold=0,
+                    EMPTY_MATCH,
+                    comp=EMPTY_COMP,
                     adjust_indent=False,
                     context=EMPTY_CONTEXT,
                     snippet=edit,

@@ -1,7 +1,8 @@
-from locale import getdefaultlocale
+from locale import getlocale
 from string import Template
 from typing import Mapping, MutableMapping, Optional, Union
 
+from pynvim_pp.lib import decode
 from std2.pickle.decoder import new_decoder
 from yaml import safe_load
 
@@ -12,7 +13,7 @@ def _get_lang(code: Optional[str], fallback: str) -> str:
     if code:
         return code.casefold()
     else:
-        tag, _ = getdefaultlocale()
+        tag, _ = getlocale()
         tag = (tag or fallback).casefold()
         primary, _, _ = tag.partition("-")
         lang, _, _ = primary.partition("_")
@@ -41,7 +42,7 @@ def init(code: Optional[str]) -> None:
     )
 
     specs = new_decoder[Mapping[str, str]](Mapping[str, str])(
-        safe_load(yml_path.read_text("UTF-8"))
+        safe_load(decode(yml_path.read_bytes()))
     )
     LANG._specs.update(specs)
 

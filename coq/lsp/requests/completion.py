@@ -1,55 +1,62 @@
 from typing import AbstractSet, AsyncIterator, Optional, cast
 
-from pynvim.api.nvim import Nvim
-from pynvim_pp.lib import encode
-
-from ...shared.types import UTF16, Context, ExternLSP, ExternLUA
+from ...shared.types import Context, ExternLSP, ExternLUA
 from ..parse import parse
+from ..protocol import protocol
 from ..types import CompletionResponse, LSPcomp
 from .request import async_request
 
 
 async def comp_lsp(
-    nvim: Nvim,
     short_name: str,
     always_on_top: Optional[AbstractSet[Optional[str]]],
     weight_adjust: float,
     context: Context,
+    chunk: int,
     clients: AbstractSet[str],
 ) -> AsyncIterator[LSPcomp]:
-    row, c = context.position
-    col = len(encode(context.line_before[:c], encoding=UTF16)) // 2
+    pc = await protocol()
 
-    async for client, reply in async_request(nvim, "lsp_comp", clients, (row, col)):
-        resp = cast(CompletionResponse, reply)
-        yield parse(
-            ExternLSP,
-            client=client,
+    async for client in async_request("lsp_comp", chunk, clients, context.cursor):
+        resp = cast(CompletionResponse, client.message)
+        parsed = parse(
+            pc,
+            extern_type=ExternLSP,
+            client=client.name,
+            encoding=client.offset_encoding,
             short_name=short_name,
+            cursors=context.cursor,
             always_on_top=always_on_top,
             weight_adjust=weight_adjust,
             resp=resp,
         )
+        yield parsed
 
 
 async def comp_thirdparty(
-    nvim: Nvim,
     short_name: str,
     always_on_top: Optional[AbstractSet[Optional[str]]],
     weight_adjust: float,
     context: Context,
+    chunk: int,
     clients: AbstractSet[str],
 ) -> AsyncIterator[LSPcomp]:
-    async for client, reply in async_request(
-        nvim, "lsp_third_party", clients, context.position, context.line
+    pc = await protocol()
+
+    async for client in async_request(
+        "lsp_third_party", chunk, clients, context.cursor, context.line
     ):
-        name = client or short_name
-        resp = cast(CompletionResponse, reply)
-        yield parse(
-            ExternLUA,
-            client=client,
+        name = client.name or short_name
+        resp = cast(CompletionResponse, client.message)
+        parsed = parse(
+            pc,
+            extern_type=ExternLUA,
+            client=client.name,
+            encoding=client.offset_encoding,
             short_name=name,
+            cursors=context.cursor,
             always_on_top=always_on_top,
             weight_adjust=weight_adjust,
             resp=resp,
         )
+        yield parsed

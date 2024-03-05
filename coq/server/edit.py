@@ -1,10 +1,9 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import chain, repeat
 from pprint import pformat
 from string import Template
 from textwrap import dedent
 from typing import (
-    AbstractSet,
     Iterable,
     Iterator,
     MutableMapping,
@@ -15,31 +14,24 @@ from typing import (
 )
 from uuid import uuid4
 
-from pynvim import Nvim
-from pynvim.api import Buffer, Window
-from pynvim.api.common import NvimError
-from pynvim_pp.api import (
-    buf_commentstr,
-    buf_get_extmarks,
-    buf_get_lines,
-    buf_set_text,
-    create_ns,
-    cur_win,
-    win_get_buf,
-    win_get_cursor,
-    win_set_cursor,
-)
-from pynvim_pp.lib import decode, encode, write
+from pynvim_pp.buffer import Buffer
+from pynvim_pp.lib import decode, encode
 from pynvim_pp.logging import log
+from pynvim_pp.nvim import Nvim
+from pynvim_pp.rpc_types import NvimError
+from pynvim_pp.window import Window
 from std2.types import never
 
 from ..consts import DEBUG
 from ..lang import LANG
+from ..shared.parse import coalesce
 from ..shared.runtime import Metric
+from ..shared.settings import CompleteOptions, MatchOptions
 from ..shared.trans import indent_adjusted, trans_adjusted
 from ..shared.types import (
     UTF8,
     UTF16,
+    UTF32,
     BaseRangeEdit,
     Completion,
     Context,
@@ -49,6 +41,7 @@ from ..shared.types import (
     NvimPos,
     SnippetEdit,
     SnippetRangeEdit,
+    TextTransforms,
 )
 from ..snippets.parse import ParsedEdit, parse_basic, parse_ranged
 from ..snippets.parsers.types import ParseError, ParseInfo
@@ -74,6 +67,7 @@ class _Lines:
     lines: Sequence[str]
     b_lines8: Sequence[bytes]
     b_lines16: Sequence[bytes]
+    b_lines32: Sequence[bytes]
     len8: Sequence[int]
 
 
@@ -89,6 +83,7 @@ def _lines(lines: Sequence[str]) -> _Lines:
         lines=lines,
         b_lines8=b_lines8,
         b_lines16=tuple(encode(line, encoding=UTF16) for line in lines),
+        b_lines32=tuple(encode(line, encoding=UTF32) for line in lines),
         len8=tuple(len(line) for line in b_lines8),
     )
 
@@ -134,7 +129,7 @@ def _contextual_edit_trans(
     )
     c2 = (
         len(encode(old_suffix_lines[-1]))
-        if len(old_prefix_lines) > 1
+        if len(old_suffix_lines) > 1
         else col + len(encode(old_suffix_lines[0]))
     )
 
@@ -171,19 +166,14 @@ def _contextual_edit_trans(
 
 
 def _edit_trans(
-    unifying_chars: AbstractSet[str],
+    match: MatchOptions,
+    comp: CompleteOptions,
     adjust_indent: bool,
-    replace_prefix_threshold: int,
     ctx: Context,
     lines: _Lines,
     edit: Edit,
 ) -> EditInstruction:
-    adjusted = trans_adjusted(
-        unifying_chars,
-        replace_prefix_threshold=replace_prefix_threshold,
-        ctx=ctx,
-        new_text=edit.new_text,
-    )
+    adjusted = trans_adjusted(match, comp=comp, ctx=ctx, new_text=edit.new_text)
     inst = _contextual_edit_trans(
         ctx, adjust_indent=adjust_indent, lines=lines, edit=adjusted
     )
@@ -191,19 +181,34 @@ def _edit_trans(
 
 
 def _range_edit_trans(
-    unifying_chars: AbstractSet[str],
-    replace_prefix_threshold: int,
+    match: MatchOptions,
+    comp: CompleteOptions,
     adjust_indent: bool,
     ctx: Context,
     primary: bool,
     lines: _Lines,
     edit: BaseRangeEdit,
 ) -> EditInstruction:
-    if primary and not isinstance(edit, ParsedEdit) and edit.begin == edit.end:
+    if (
+        primary
+        and not isinstance(edit, ParsedEdit)
+        and edit.begin == edit.end
+        and len(
+            tuple(
+                coalesce(
+                    match.unifying_chars,
+                    include_syms=True,
+                    backwards=None,
+                    chars=edit.new_text,
+                )
+            )
+        )
+        > 1
+    ):
         return _edit_trans(
-            unifying_chars,
+            match,
+            comp=replace(comp, replace_suffix_threshold=1),
             adjust_indent=adjust_indent,
-            replace_prefix_threshold=replace_prefix_threshold,
             ctx=ctx,
             lines=lines,
             edit=edit,
@@ -216,11 +221,16 @@ def _range_edit_trans(
         if edit.encoding == UTF16:
             c1 = len(encode(decode(lines.b_lines16[r1][: ec1 * 2], encoding=UTF16)))
             c2 = len(encode(decode(lines.b_lines16[r2][: ec2 * 2], encoding=UTF16)))
-        elif edit.encoding == UTF8:
+        elif edit.encoding == UTF8 or edit.encoding == UTF32:
             c1 = len(lines.b_lines8[r1][:ec1])
             c2 = len(lines.b_lines8[r2][:ec2])
+        elif edit.encoding == UTF32:  # type: ignore
+            # ccls says its utf-32, but its utf-8(ish)
+            c1 = len(encode(decode(lines.b_lines32[r1][: ec1 * 4], encoding=UTF32)))
+            c2 = len(encode(decode(lines.b_lines32[r2][: ec2 * 4], encoding=UTF32)))
+            never(edit.encoding)
         else:
-            raise ValueError(f"Unknown encoding -- {edit.encoding}")
+            never(edit.encoding)
 
         begin = r1, c1
         end = r2, c2
@@ -262,8 +272,8 @@ def _range_edit_trans(
 
 def _instructions(
     ctx: Context,
-    unifying_chars: AbstractSet[str],
-    replace_prefix_threshold: int,
+    match: MatchOptions,
+    comp: CompleteOptions,
     adjust_indent: bool,
     lines: _Lines,
     primary: Edit,
@@ -271,8 +281,8 @@ def _instructions(
 ) -> Iterator[EditInstruction]:
     if isinstance(primary, BaseRangeEdit):
         inst = _range_edit_trans(
-            unifying_chars,
-            replace_prefix_threshold=replace_prefix_threshold,
+            match,
+            comp=comp,
             adjust_indent=adjust_indent,
             ctx=ctx,
             primary=True,
@@ -289,8 +299,8 @@ def _instructions(
 
     elif isinstance(primary, Edit):
         inst = _edit_trans(
-            unifying_chars,
-            replace_prefix_threshold=replace_prefix_threshold,
+            match,
+            comp=comp,
             adjust_indent=adjust_indent,
             ctx=ctx,
             lines=lines,
@@ -303,8 +313,8 @@ def _instructions(
 
     for edit in secondary:
         yield _range_edit_trans(
-            unifying_chars,
-            replace_prefix_threshold=replace_prefix_threshold,
+            match,
+            comp=comp,
             adjust_indent=adjust_indent,
             ctx=ctx,
             primary=False,
@@ -369,22 +379,26 @@ def _shift(
     return new_insts, m_shift
 
 
-def apply(
-    nvim: Nvim, buf: Buffer, instructions: Iterable[EditInstruction]
-) -> _MarkShift:
+async def apply(buf: Buffer, instructions: Iterable[EditInstruction]) -> _MarkShift:
     insts, m_shift = _shift(instructions)
     for inst in insts:
         try:
-            buf_set_text(
-                nvim, buf=buf, begin=inst.begin, end=inst.end, text=inst.new_lines
-            )
+            await buf.set_text(begin=inst.begin, end=inst.end, text=inst.new_lines)
         except NvimError as e:
             tpl = """
             ${e}
             ${inst}
+            ${ctx}
             """
-            msg = Template(dedent(tpl)).substitute(e=e, inst=inst)
-            log.warn(f"%s", msg)
+
+            (r1, _), (r2, _) = inst.begin, inst.end
+            try:
+                ctx = await buf.get_lines(min(r1, r2), max(r1, r2) + 1)
+            except NvimError:
+                ctx = []
+
+            msg = Template(dedent(tpl)).substitute(e=e, inst=inst, ctx=ctx)
+            log.warn("%s", msg)
 
     return m_shift
 
@@ -415,20 +429,20 @@ def _cursor(cursor: NvimPos, instructions: Iterable[EditInstruction]) -> NvimPos
     return row, col
 
 
-def _parse(
-    nvim: Nvim, buf: Buffer, stack: Stack, state: State, comp: Completion
-) -> Tuple[bool, Edit, Sequence[Mark]]:
+async def _parse(
+    buf: Buffer, stack: Stack, state: State, comp: Completion
+) -> Tuple[bool, Edit, Sequence[Mark], TextTransforms]:
     if isinstance(comp.primary_edit, SnippetEdit):
-        comment_str = buf_commentstr(nvim, buf=buf)
-        clipboard = nvim.funcs.getreg()
+        comment_str = await buf.commentstr() or ("", "")
+        clipboard = await Nvim.fn.getreg(str)
         info = ParseInfo(visual="", clipboard=clipboard, comment_str=comment_str)
         if isinstance(comp.primary_edit, SnippetRangeEdit):
             row, col = comp.primary_edit.begin
-            line, *_ = buf_get_lines(nvim, buf=buf, lo=row, hi=row + 1)
+            line, *_ = await buf.get_lines(lo=row, hi=row + 1)
             line_before = decode(
                 encode(line, encoding=comp.primary_edit.encoding)[:col]
             )
-            edit, marks = parse_ranged(
+            edit, marks, text_trans = parse_ranged(
                 context=state.context,
                 adjust_indent=comp.adjust_indent,
                 snippet=comp.primary_edit,
@@ -436,9 +450,9 @@ def _parse(
                 line_before=line_before,
             )
         else:
-            edit, marks = parse_basic(
-                stack.settings.match.unifying_chars,
-                replace_prefix_threshold=stack.settings.completion.replace_prefix_threshold,
+            edit, marks, text_trans = parse_basic(
+                stack.settings.match,
+                comp=stack.settings.completion,
                 adjust_indent=comp.adjust_indent,
                 context=state.context,
                 snippet=comp.primary_edit,
@@ -447,24 +461,22 @@ def _parse(
         adjusted = True
     else:
         adjusted = False
-        edit, marks = comp.primary_edit, ()
+        edit, marks, text_trans = comp.primary_edit, (), {}
 
-    return adjusted, edit, marks
+    return adjusted, edit, marks, text_trans
 
 
-def _restore(
-    nvim: Nvim, win: Window, buf: Buffer, pos: NvimPos
-) -> Tuple[str, Optional[int]]:
+async def _restore(win: Window, buf: Buffer, pos: NvimPos) -> Tuple[str, Optional[int]]:
     row, _ = pos
-    ns = create_ns(nvim, ns=NS)
-    marks = tuple(buf_get_extmarks(nvim, buf=buf, id=ns))
+    ns = await Nvim.create_namespace(NS)
+    marks = await buf.get_extmarks(ns)
     if len(marks) != 2:
         return "", 0
     else:
         m1, m2 = marks
-        after, *_ = buf_get_lines(nvim, buf=buf, lo=row, hi=row + 1)
-        cur_row, cur_col = win_get_cursor(nvim, win=win)
-
+        after, *_ = await buf.get_lines(lo=row, hi=row + 1)
+        cur_row, cur_col = await win.get_cursor()
+        assert m1.end
         (_, lo), (_, hi) = m1.end, m2.begin
 
         binserted = encode(after)[lo:hi]
@@ -473,40 +485,49 @@ def _restore(
         movement = cur_col - lo if cur_row == row and lo <= cur_col <= hi else None
 
         if inserted:
-            buf_set_text(nvim, buf=buf, begin=m1.end, end=m2.begin, text=("",))
+            await buf.set_text(begin=m1.end, end=m2.begin, text=("",))
 
         return inserted, movement
 
 
-def edit(
-    nvim: Nvim,
+async def reset_undolevels() -> None:
+    undolevels = await Nvim.opts.get(int, "undolevels")
+    await Nvim.opts.set("undolevels", val=undolevels)
+
+
+async def edit(
     stack: Stack,
     state: State,
     metric: Metric,
     synthetic: bool,
-) -> Optional[NvimPos]:
-    win = cur_win(nvim)
-    buf = win_get_buf(nvim, win=win)
+) -> Optional[Tuple[NvimPos, Optional[TextTransforms]]]:
+    win = await Window.get_current()
+    buf = await win.get_buf()
     if buf.number != state.context.buf_id:
         log.warn("%s", "stale buffer")
         return None
     else:
-        nvim.options["undolevels"] = nvim.options["undolevels"]
+        await reset_undolevels()
 
         if synthetic:
             inserted, movement = "", None
         else:
-            inserted, movement = _restore(
-                nvim, win=win, buf=buf, pos=state.context.position
+            inserted, movement = await _restore(
+                win=win, buf=buf, pos=state.context.position
             )
 
         try:
-            adjusted, primary, marks = _parse(
-                nvim, buf=buf, stack=stack, state=state, comp=metric.comp
+            adjusted, primary, marks, text_trans = await _parse(
+                buf=buf, stack=stack, state=state, comp=metric.comp
             )
         except (NvimError, ParseError) as e:
-            adjusted, primary, marks = False, metric.comp.primary_edit, ()
-            write(nvim, LANG("failed to parse snippet"))
+            adjusted, primary, marks, text_trans = (
+                False,
+                metric.comp.primary_edit,
+                (),
+                {},
+            )
+            await Nvim.write(LANG("failed to parse snippet"))
             log.info("%s", e)
 
         adjust_indent = metric.comp.adjust_indent and not adjusted
@@ -515,20 +536,21 @@ def edit(
             primary,
             *metric.comp.secondary_edits,
         )
+
         if lo < 0 or hi > state.context.line_count:
             log.warn("%s", pformat(("OUT OF BOUNDS", (lo, hi), metric)))
             return None
         else:
-            limited_lines = buf_get_lines(nvim, buf=buf, lo=lo, hi=hi)
+            limited_lines = await buf.get_lines(lo=lo, hi=hi)
             lines = [*chain(repeat("", times=lo), limited_lines)]
             view = _lines(lines)
 
             instructions = _consolidate(
                 *_instructions(
                     state.context,
-                    unifying_chars=stack.settings.match.unifying_chars,
+                    match=stack.settings.match,
+                    comp=stack.settings.completion,
                     adjust_indent=adjust_indent,
-                    replace_prefix_threshold=stack.settings.completion.replace_prefix_threshold,
                     lines=view,
                     primary=primary,
                     secondary=metric.comp.secondary_edits,
@@ -542,12 +564,10 @@ def edit(
             if not synthetic:
                 stack.idb.inserted(metric.instance.bytes, sort_by=metric.comp.sort_by)
 
-            m_shift = apply(nvim, buf=buf, instructions=instructions)
+            m_shift = await apply(buf=buf, instructions=instructions)
             if inserted:
                 try:
-                    buf_set_text(
-                        nvim,
-                        buf=buf,
+                    await buf.set_text(
                         begin=(n_row, n_col),
                         end=(n_row, n_col),
                         text=(inserted,),
@@ -557,23 +577,22 @@ def edit(
 
             if movement is not None:
                 try:
-                    win_set_cursor(nvim, win=win, row=n_row, col=n_col + movement)
+                    await win.set_cursor(row=n_row, col=n_col + movement)
                 except NvimError as e:
                     log.warn("%s", e)
 
-            if marks:
-                new_marks = tuple(_shift_marks(m_shift, marks=marks))
-                mark(nvim, settings=stack.settings, buf=buf, marks=new_marks)
+            if new_marks := tuple(_shift_marks(m_shift, marks=marks)):
+                await mark(settings=stack.settings, buf=buf, marks=new_marks)
 
             if DEBUG:
                 log.debug(
                     "%s",
                     pformat(
                         (
-                            (metric.comp.primary_edit, *metric.comp.secondary_edits),
+                            metric,
                             instructions,
                         )
                     ),
                 )
 
-            return n_row, n_col
+            return (n_row, n_col), text_trans

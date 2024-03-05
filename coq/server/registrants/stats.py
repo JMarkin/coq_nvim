@@ -3,9 +3,9 @@ from locale import strxfrm
 from os import linesep
 from string import Template
 from typing import Iterable, Iterator, Mapping, Sequence, Tuple
+from uuid import uuid4
 
-from pynvim import Nvim
-from pynvim_pp.api import buf_set_lines, buf_set_option, create_buf, win_close
+from pynvim_pp.buffer import Buffer
 from pynvim_pp.float_win import list_floatwins, open_float_win
 from pynvim_pp.lib import display_width
 from std2.locale import si_prefixed_smol
@@ -31,6 +31,8 @@ ${{chart3}}
 
 ${{desc}}
 """.lstrip()
+
+_NS = uuid4()
 
 
 def _table(headers: Sequence[str], rows: Mapping[str, Mapping[str, str]]) -> str:
@@ -84,17 +86,17 @@ def _trans(stat: Statistics) -> Iterator[Tuple[str, Mapping[str, str]]]:
 
     m2 = {
         "Avg Duration": f"{si_prefixed_smol(stat.avg_duration, precision=0)}s",
-        "Q0 Duration": f"{si_prefixed_smol(stat.q0_duration, precision=0)}s",
+        "Q10 Duration": f"{si_prefixed_smol(stat.q10_duration, precision=0)}s",
         "Q50 Duration": f"{si_prefixed_smol(stat.q50_duration, precision=0)}s",
         "Q95 Duration": f"{si_prefixed_smol(stat.q95_duration, precision=0)}s",
-        "Q100 Duration": f"{si_prefixed_smol(stat.q100_duration, precision=0)}s",
+        "Q99 Duration": f"{si_prefixed_smol(stat.q99_duration, precision=0)}s",
     }
     yield stat.source, m2
 
     m3 = {
         "Avg Items": str(round(stat.avg_items)),
         "Q50 Items": str(stat.q50_items),
-        "Q100 Items": str(stat.q100_items),
+        "Q99 Items": str(stat.q99_items),
     }
     yield stat.source, m3
 
@@ -110,8 +112,8 @@ def _pprn(stats: Iterable[Statistics]) -> Iterator[str]:
             yield table
 
 
-@rpc(blocking=True)
-def stats(nvim: Nvim, stack: Stack, *_: str) -> None:
+@rpc()
+async def stats(stack: Stack, *_: str) -> None:
     stats = stack.idb.stats()
     chart1, chart2, chart3 = _pprn(stats)
     desc = MD_STATS.read_text()
@@ -120,12 +122,12 @@ def stats(nvim: Nvim, stack: Stack, *_: str) -> None:
         .substitute(chart1=chart1, chart2=chart2, chart3=chart3, desc=desc)
         .splitlines()
     )
-    for win in list_floatwins(nvim):
-        win_close(nvim, win=win)
-    buf = create_buf(
-        nvim, listed=False, scratch=True, wipe=True, nofile=True, noswap=True
+    async for win in list_floatwins(_NS):
+        await win.close()
+    buf = await Buffer.create(
+        listed=False, scratch=True, wipe=True, nofile=True, noswap=True
     )
-    buf_set_lines(nvim, buf=buf, lo=0, hi=-1, lines=lines)
-    buf_set_option(nvim, buf=buf, key="modifiable", val=False)
-    buf_set_option(nvim, buf=buf, key="syntax", val="markdown")
-    open_float_win(nvim, margin=0, relsize=0.95, buf=buf, border="rounded")
+    await buf.set_lines(lines)
+    await buf.opts.set("modifiable", val=False)
+    await buf.opts.set("syntax", val="markdown")
+    await open_float_win(_NS, margin=0, relsize=0.95, buf=buf, border="rounded")

@@ -9,36 +9,35 @@ jobs:
     strategy:
       matrix:
         python_ver:
-          - "3.x"
-          - "3.10"
-          - "3.9"
           - "3.8"
-          - "3.8.2"
+          - "3.9"
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3"
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
 
       - name: Setup Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v3
         with:
           python-version: ${{ matrix.python_ver }}
 
-      - name: Pip Packages
-        run: pip install --upgrade codespell mypy types-PyYAML -r requirements.txt
+      - run: |-
+          sudo -- apt install --yes -- universal-ctags
 
-      - name: Apt Packages
-        run: sudo apt install -y universal-ctags
+      - run: |-
+          pip3 install -- codespell
+          codespell --skip ./artifacts/helo.yml --skip ./tests/shared/fuzzy.py
 
-      - name: Codespell
-        run: codespell --skip ./artifacts/helo.yml
+      - run: |-
+          make lint
 
-      - name: Lint
-        run: mypy -- .
+      - run: |-
+          python3 -m coq deps
 
-      - name: Install
-        run: python3 -m coq deps
-
-      - name: Test
-        run: python3 -m tests
+      - run: |-
+          make test

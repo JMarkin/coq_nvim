@@ -1,4 +1,3 @@
-from asyncio import gather
 from contextlib import suppress
 from os import linesep
 from os.path import normcase
@@ -14,14 +13,14 @@ from typing import (
     Tuple,
 )
 
-from pynvim.api.nvim import Nvim, NvimError
-from pynvim_pp.api import buf_name, list_bufs
-from pynvim_pp.lib import async_call, go
-from pynvim_pp.logging import with_suppress
+from pynvim_pp.atomic import Atomic
+from pynvim_pp.buffer import Buffer
+from pynvim_pp.logging import suppress_and_log
+from pynvim_pp.rpc_types import NvimError
 from std2.asyncio import to_thread
 
-from ...databases.tags.database import CTDB
 from ...paths.show import fmt_path
+from ...shared.executor import AsyncExecutor
 from ...shared.runtime import Supervisor
 from ...shared.runtime import Worker as BaseWorker
 from ...shared.settings import TagsClient
@@ -29,16 +28,21 @@ from ...shared.timeit import timeit
 from ...shared.types import Completion, Context, Doc, Edit
 from ...tags.parse import parse, run
 from ...tags.types import Tag
+from .db.database import CTDB
 
 
-async def _ls(nvim: Nvim) -> AbstractSet[str]:
-    def cont() -> Iterator[str]:
-        for buf in list_bufs(nvim, listed=True):
-            with suppress(NvimError):
-                filename = buf_name(nvim, buf=buf)
-                yield filename
+async def _ls() -> AbstractSet[str]:
+    try:
+        bufs = await Buffer.list(listed=True)
+        atomic = Atomic()
 
-    return await async_call(nvim, lambda: {*cont()})
+        for buf in bufs:
+            atomic.buf_get_name(buf)
+        names = await atomic.commit(str)
+    except NvimError:
+        return set()
+    else:
+        return {*names}
 
 
 async def _mtimes(paths: AbstractSet[str]) -> Mapping[str, float]:
@@ -117,10 +121,7 @@ def _doc(client: TagsClient, context: Context, tag: Tag) -> Doc:
             yield rc
             yield linesep
 
-        if pattern := tag["pattern"]:
-            yield pattern
-        else:
-            yield tag["name"]
+        yield tag["pattern"] or tag["name"]
 
     doc = Doc(
         text="".join(cont()),
@@ -129,21 +130,30 @@ def _doc(client: TagsClient, context: Context, tag: Tag) -> Doc:
     return doc
 
 
-class Worker(BaseWorker[TagsClient, CTDB]):
+class Worker(BaseWorker[TagsClient, Tuple[Path, Path, PurePath]]):
     def __init__(
-        self, supervisor: Supervisor, options: TagsClient, misc: Tuple[CTDB, Path]
+        self,
+        ex: AsyncExecutor,
+        supervisor: Supervisor,
+        options: TagsClient,
+        misc: Tuple[Path, Path, PurePath],
     ) -> None:
-        db, self._exec = misc
-        super().__init__(supervisor, options=options, misc=db)
-        go(supervisor.nvim, aw=self._poll())
+        self._exec, vars_dir, cwd = misc
+        self._db = CTDB(vars_dir, cwd=cwd)
+        super().__init__(ex, supervisor=supervisor, options=options, misc=misc)
+        self._ex.run(self._poll())
+
+    def interrupt(self) -> None:
+        with self._interrupt():
+            self._db.interrupt()
 
     async def _poll(self) -> None:
         while True:
-            with with_suppress():
-                with timeit("IDLE :: TAGS"):
-                    buf_names, existing = await gather(
-                        _ls(self._supervisor.nvim), self._misc.paths()
-                    )
+
+            async def cont() -> None:
+                with suppress_and_log(), timeit("IDLE :: TAGS"):
+                    buf_names = await _ls()
+                    existing = self._db.paths()
                     paths = buf_names | existing.keys()
                     mtimes = await _mtimes(paths)
                     query_paths = tuple(
@@ -154,15 +164,23 @@ class Worker(BaseWorker[TagsClient, CTDB]):
                     raw = await run(self._exec, *query_paths) if query_paths else ""
                     new = parse(mtimes, raw=raw)
                     dead = existing.keys() - mtimes.keys()
-                    await self._misc.reconciliate(dead, new=new)
+                    self._db.reconciliate(dead, new=new)
 
-                async with self._supervisor.idling:
-                    await self._supervisor.idling.wait()
+            await self._with_interrupt(cont())
+            async with self._idle:
+                await self._idle.wait()
 
-    async def work(self, context: Context) -> AsyncIterator[Completion]:
+    async def swap(self, cwd: PurePath) -> None:
+        async def cont() -> None:
+            with self._interrupt_lock:
+                self._db.swap(cwd)
+
+        await self._ex.submit(cont())
+
+    async def _work(self, context: Context) -> AsyncIterator[Completion]:
         async with self._work_lock:
             row, _ = context.position
-            tags = await self._misc.select(
+            tags = self._db.select(
                 self._supervisor.match,
                 filename=context.filename,
                 line_num=row,

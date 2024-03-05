@@ -1,21 +1,22 @@
 from asyncio import gather
 from dataclasses import dataclass
-from typing import AbstractSet, Iterator, Mapping, Optional, Sequence, Tuple
+from functools import lru_cache
+from os import environ
+from pathlib import Path
+from typing import Iterator, Mapping, Optional, Sequence, Tuple
 
 from pynvim_pp.lib import decode
 from std2.asyncio.subprocess import call
 
-from ..shared.parse import coalesce
+from ..shared.executor import very_nice
 
-_SEP = "\x1f"
+_SEP = "∪"
 
 
 @dataclass(frozen=True)
 class Pane:
     session: str
     uid: str
-    pane_active: bool
-    window_active: bool
 
     session_name: str
     window_index: int
@@ -24,10 +25,12 @@ class Pane:
     pane_title: str
 
 
-async def _panes(all_sessions: bool) -> Sequence[Pane]:
+async def _panes(tmux: Path, all_sessions: bool) -> Sequence[Pane]:
+    prefix = await very_nice()
     try:
         proc = await call(
-            "tmux",
+            *prefix,
+            tmux,
             "list-panes",
             ("-a" if all_sessions else "-s"),
             "-F",
@@ -35,8 +38,6 @@ async def _panes(all_sessions: bool) -> Sequence[Pane]:
                 (
                     "#{session_id}",
                     "#{pane_id}",
-                    "#{pane_active}",
-                    "#{window_active}",
                     "#{session_name}",
                     "#{window_index}",
                     "#{window_name}",
@@ -58,8 +59,6 @@ async def _panes(all_sessions: bool) -> Sequence[Pane]:
                     (
                         session,
                         pane_id,
-                        pane_active,
-                        window_active,
                         session_name,
                         window_index,
                         window_name,
@@ -69,8 +68,6 @@ async def _panes(all_sessions: bool) -> Sequence[Pane]:
                     pane = Pane(
                         session=session,
                         uid=pane_id,
-                        pane_active=bool(int(pane_active)),
-                        window_active=bool(int(window_active)),
                         session_name=session_name,
                         window_index=int(window_index),
                         window_name=window_name,
@@ -82,58 +79,42 @@ async def _panes(all_sessions: bool) -> Sequence[Pane]:
             return tuple(cont())
 
 
-async def _session() -> Optional[str]:
+async def _screenshot(tmux: Path, pane: Pane) -> Tuple[Pane, str]:
+    prefix = await very_nice()
     try:
         proc = await call(
-            "tmux", "display-message", "-p", "#{session_id}", check_returncode=set()
-        )
-    except OSError:
-        return None
-    else:
-        if proc.returncode:
-            return None
-        else:
-            session = decode(proc.stdout).strip()
-            return session
-
-
-async def _screenshot(
-    unifying_chars: AbstractSet[str],
-    pane: Pane,
-) -> Tuple[Pane, Iterator[str]]:
-    try:
-        proc = await call(
-            "tmux",
+            *prefix,
+            tmux,
             "capture-pane",
             "-p",
+            "-J",
             "-t",
             pane.uid,
             check_returncode=set(),
         )
     except OSError:
-        return pane, iter(())
+        return pane, ""
     else:
         if proc.returncode:
-            return pane, iter(())
+            return pane, ""
         else:
-            words = coalesce(decode(proc.stdout), unifying_chars=unifying_chars)
-            return pane, words
+            text = decode(proc.stdout)
+            return pane, text
+
+
+@lru_cache(maxsize=None)
+def pane_id() -> Optional[str]:
+    return environ.get("TMUX_PANE")
 
 
 async def snapshot(
-    all_sessions: bool, unifying_chars: AbstractSet[str]
-) -> Tuple[Optional[str], Mapping[Pane, Iterator[str]]]:
-    session, panes = await gather(_session(), _panes(all_sessions))
-    shots = await gather(
-        *(_screenshot(unifying_chars=unifying_chars, pane=pane) for pane in panes)
-    )
+    tmux: Path, all_sessions: bool
+) -> Tuple[Optional[Pane], Mapping[Pane, str]]:
+    panes = await _panes(tmux, all_sessions=all_sessions)
+    shots = await gather(*(_screenshot(tmux, pane=pane) for pane in panes))
     current = next(
-        (
-            pane
-            for pane in panes
-            if pane.session == session and pane.window_active and pane.pane_active
-        ),
+        (pane for pane in panes if pane.uid == pane_id()),
         None,
     )
-    snapshot = {pane: words for pane, words in shots}
-    return current.uid if current else None, snapshot
+    snapshot = {pane: text for pane, text in shots}
+    return current, snapshot

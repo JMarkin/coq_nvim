@@ -6,7 +6,7 @@ Named after the [famous theorem prover](https://coq.inria.fr/)
 
 Fast as FUCK and loads of features.
 
-## Faster Than Lua
+## Faster Than Pure Lua
 
 - Native C in-memory B-trees
 
@@ -65,6 +65,8 @@ Error correction: `cour` -> `colour_space`, `flgr` -> `flag_group`, `nasp` -> `N
 - **Client-side caching**
 
 - **Multi-server** completion (i.e. `tailwind` + `cssls`)
+
+- **Multi-encoding** `utf-8`, `utf-16`, `utf-32`
 
 - Header imports
 
@@ -164,6 +166,12 @@ apt install universal-ctags    # good
 
 ![buffers.img](https://raw.githubusercontent.com/ms-jpq/coq.artifacts/artifacts/preview/buffers.gif)
 
+### Registers
+
+- **words** Last yank `0` + custom `a-z` `coq_settings.clients.registers.words`
+
+- **lines** `coq_settings.clients.registers.lines` (`a-z`)
+
 ### Tmux
 
 ![tmux.img](https://raw.githubusercontent.com/ms-jpq/coq.artifacts/artifacts/preview/tmux.gif)
@@ -174,6 +182,8 @@ apt install universal-ctags    # good
 
 - Auto download & install & update
 
+- Platform specific `cgroupv2` & `taskpolicy` core pinning / CPU management.
+
 ![tabnine.img](https://raw.githubusercontent.com/ms-jpq/coq.artifacts/artifacts/preview/tabnine.gif)
 
 _T9 is disabled by default, I might remove it, if they do not improve the CPU usage. [Their own bug tracker](https://github.com/codota/TabNine/issues/43)._
@@ -182,7 +192,7 @@ Enable via: `coq_settings.clients.tabnine.enabled=true`
 
 ### [Modular lua sources](https://github.com/ms-jpq/coq.thirdparty) & external third party integrations
 
-- **Even faster than lua**! (transparent `sqlite` caching)
+- **Even faster than pure lua**! (transparent `sqlite` caching)
 
 - [**Tons of built-ins**](https://github.com/ms-jpq/coq.thirdparty)
 
@@ -194,7 +204,25 @@ Enable via: `coq_settings.clients.tabnine.enabled=true`
 
 Shown above: shell repl.
 
-Other built-ins: nvim lua API, scientific calculator, comment banners, moo!
+Some other built-ins:
+
+- nvim lua API
+
+- [vim runtime](https://github.com/neovim/neovim/tree/master/runtime/autoload): `ada, c, clojure, css, haskell, html, js, php, syntax`
+
+- [scientific calculator](https://linux.die.net/man/1/bc)
+
+- [comment banners](https://linux.die.net/man/6/figlet)
+
+- [moo!](https://linux.die.net/man/1/cowsay)
+
+- [vimtex](https://github.com/lervag/vimtex)
+
+- [orgmode.nvim](https://github.com/kristijanhusak/orgmode.nvim)
+
+- [vim dadbod](https://github.com/kristijanhusak/vim-dadbod-completion)
+
+- [nvim-dap](https://github.com/mfussenegger/nvim-dap)
 
 ### Statistics
 

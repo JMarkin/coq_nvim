@@ -1,7 +1,12 @@
 from itertools import chain, repeat
 from typing import AbstractSet, Iterable, Iterator
 
+from pynvim_pp.text_object import is_word
+from std2.string import removesuffix
+
+from ..shared.settings import CompleteOptions, MatchOptions
 from .context import cword_after, cword_before
+from .fuzzy import multi_set_ratio
 from .parse import coalesce, lower
 from .types import Context, ContextualEdit
 
@@ -26,7 +31,12 @@ def _line_match(
 ) -> str:
     existing, insertion = lower(existing), lower(insertion)
     if lhs:
-        prefix = next(coalesce(insertion, unifying_chars=unifying_chars), "")
+        prefix = next(
+            coalesce(
+                unifying_chars, include_syms=True, backwards=False, chars=insertion
+            ),
+            "",
+        )
         for match in reverse_acc(0, seq=insertion):
             if match == existing[-len(match) :]:
                 if match == prefix or len(match) >= replace_prefix_threshold:
@@ -45,6 +55,7 @@ def _line_match(
 
 def trans(
     replace_prefix_threshold: int,
+    replace_suffix_threshold: int,
     unifying_chars: AbstractSet[str],
     line_before: str,
     line_after: str,
@@ -59,7 +70,7 @@ def trans(
     )
     rest = new_text[len(l_match) :]
     r_match = _line_match(
-        replace_prefix_threshold,
+        replace_suffix_threshold,
         unifying_chars=unifying_chars,
         lhs=False,
         existing=line_after,
@@ -75,29 +86,64 @@ def trans(
 
 
 def trans_adjusted(
-    unifying_chars: AbstractSet[str],
-    replace_prefix_threshold: int,
+    match: MatchOptions,
+    comp: CompleteOptions,
     ctx: Context,
     new_text: str,
 ) -> ContextualEdit:
     edit = trans(
-        replace_prefix_threshold,
-        unifying_chars=unifying_chars,
+        comp.replace_prefix_threshold,
+        replace_suffix_threshold=comp.replace_suffix_threshold,
+        unifying_chars=match.unifying_chars,
         line_before=ctx.line_before,
         line_after=ctx.line_after,
         new_text=new_text,
     )
 
-    simple_before = cword_before(
-        unifying_chars, lower=False, context=ctx, sort_by=edit.new_text
-    )
-    simple_after = cword_after(
-        unifying_chars, lower=False, context=ctx, sort_by=edit.new_text
+    tokens = tuple(
+        coalesce(
+            match.unifying_chars, include_syms=True, backwards=False, chars=new_text
+        )
     )
 
-    tokens = len(tuple(coalesce(new_text, unifying_chars=unifying_chars)))
-    old_prefix = simple_before if tokens <= 1 else edit.old_prefix or simple_before
-    old_suffix = simple_after if tokens <= 1 else edit.old_suffix
+    if len(edit.old_prefix) >= comp.replace_prefix_threshold:
+        old_prefix = edit.old_prefix
+    elif ctx.syms_before and edit.new_text.startswith(ctx.syms_before):
+        old_prefix = ctx.syms_before
+    elif ctx.words_before and edit.new_text.startswith(ctx.words_before):
+        old_prefix = ctx.words_before
+    elif len(tokens) <= 1:
+        simple_before = cword_before(
+            match.unifying_chars, lower=False, context=ctx, sort_by=edit.new_text
+        )
+        old_prefix = simple_before
+    elif chr := next(chain.from_iterable(tokens), ""):
+        if is_word(match.unifying_chars, chr=chr):
+            old_prefix = edit.old_prefix or ctx.words_before
+        else:
+            first_token = next(iter(tokens), "")
+            pure_sym_before = removesuffix(ctx.syms_before, (ctx.words_before))
+            limited_sym_before = pure_sym_before[-len(first_token) :]
+            syms_before = limited_sym_before + ctx.words_before
+
+            old_prefix = (
+                syms_before
+                if multi_set_ratio(syms_before, new_text, look_ahead=match.look_ahead)
+                >= match.fuzzy_cutoff
+                else edit.old_prefix or ctx.words_before
+            )
+    else:
+        old_prefix = edit.old_prefix
+
+    if len(edit.old_suffix) >= min(comp.replace_suffix_threshold, len(ctx.line_after)):
+        old_suffix = edit.old_suffix
+    elif len(tokens) <= 1:
+        simple_after = cword_after(
+            match.unifying_chars, lower=False, context=ctx, sort_by=edit.new_text
+        )
+        old_suffix = simple_after
+    else:
+        old_suffix = edit.old_suffix
 
     adjusted = ContextualEdit(
         new_text=edit.new_text,
@@ -132,4 +178,7 @@ def indent_adjusted(
     indent = _indent_to_line(context, line_before=line_before)
     expanded = (expand_tabs(context, text=line) for line in lines)
     for lhs, rhs in zip(chain(("",), repeat(indent)), expanded):
-        yield lhs + rhs
+        if rhs:
+            yield lhs + rhs
+        else:
+            yield rhs

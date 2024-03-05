@@ -1,1 +1,1 @@
-PRAGMA foreign_keys = ON;
+../../../../clients/buffers/db/sql/create/pragma.sql

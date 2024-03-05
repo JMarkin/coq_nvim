@@ -1,21 +1,48 @@
+from abc import abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path, PurePath
-from typing import Any, Literal, Mapping, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Literal,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    Union,
+)
 from uuid import UUID, uuid4
 
 UTF8: Literal["UTF-8"] = "UTF-8"
 UTF16: Literal["UTF-16-LE"] = "UTF-16-LE"
+# TODO: utf-32
+UTF32: Literal["UTF-32-LE"] = "UTF-32-LE"
+Encoding = Literal["UTF-8", "UTF-16-LE", "UTF-32-LE"]
+
+NvimCursor = int
+WTF8Cursor = int
 
 # In nvim, the col is a ut8 byte offset
-NvimPos = Tuple[int, int]
+NvimPos = Tuple[int, NvimCursor]
 # Depends on `OffsetEncoding`
-WTF8Pos = Tuple[int, int]
+WTF8Pos = Tuple[int, WTF8Cursor]
 
 BYTE_TRANS = {
     UTF8: 1,
     UTF16: 2,
+    UTF32: 4,
 }
+
+
+@dataclass(frozen=True)
+class ChangeEvent:
+    range: range
+    lines: Sequence[str]
+
+
+Cursors = Tuple[int, NvimCursor, WTF8Cursor, WTF8Cursor]
 
 
 @dataclass(frozen=True)
@@ -44,7 +71,9 @@ class Context:
     comment: Tuple[str, str]
 
     position: NvimPos
+    cursor: Cursors
     scr_col: int
+    win_size: int
 
     line: str
     line_before: str
@@ -73,6 +102,8 @@ class Context:
 
     is_lower: bool
 
+    change: Optional[ChangeEvent]
+
 
 @dataclass(frozen=True)
 class Edit:
@@ -98,15 +129,17 @@ class BaseRangeEdit(Edit):
 
     begin: WTF8Pos
     end: WTF8Pos
-    encoding: Literal["UTF-8", "UTF-16-LE"]
+    cursor_pos: WTF8Cursor
+    encoding: Encoding
 
 
 @dataclass(frozen=True)
 class RangeEdit(BaseRangeEdit):
-    fallback: str
+    fallback: Optional[str]
 
 
 class SnippetGrammar(Enum):
+    lit = auto()
     lsp = auto()
     snu = auto()
 
@@ -143,8 +176,7 @@ class ExternLSP:
 
 
 @dataclass(frozen=True)
-class ExternLUA(ExternLSP):
-    ...
+class ExternLUA(ExternLSP): ...
 
 
 @dataclass(frozen=True)
@@ -170,3 +202,12 @@ class Completion:
     kind: str = ""
     doc: Optional[Doc] = None
     extern: Union[ExternLSP, ExternLUA, ExternPath, None] = None
+
+
+TextTransform = Callable[[Optional[str]], Union[Sequence[str], str]]
+TextTransforms = Mapping[int, TextTransform]
+
+
+class Interruptible(Protocol):
+    @abstractmethod
+    def interrupt(self) -> None: ...

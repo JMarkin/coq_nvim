@@ -6,8 +6,8 @@ from random import choice, sample
 from sys import stdout
 from typing import Sequence, Tuple
 
-from pynvim import Nvim
-from pynvim_pp.lib import encode, write
+from pynvim_pp.lib import decode, encode
+from pynvim_pp.nvim import Nvim
 from std2.argparse import ArgparseError, ArgParser
 from std2.pickle.decoder import new_decoder
 from yaml import safe_load
@@ -25,7 +25,7 @@ class _Helo:
     helo: Sequence[str]
 
 
-_HELO = new_decoder[_Helo](_Helo)(safe_load(HELO_ARTIFACTS.read_text("UTF-8")))
+_HELO = new_decoder[_Helo](_Helo)(safe_load(decode(HELO_ARTIFACTS.read_bytes())))
 
 
 def _parse_args(args: Sequence[str]) -> Namespace:
@@ -34,20 +34,21 @@ def _parse_args(args: Sequence[str]) -> Namespace:
     return parser.parse_args(args)
 
 
-@rpc(blocking=True)
-def now(nvim: Nvim, stack: Stack, args: Sequence[str]) -> None:
+@rpc()
+async def now(stack: Stack, args: Sequence[str]) -> None:
     try:
         ns = _parse_args(args)
     except ArgparseError as e:
-        write(nvim, e, error=True)
+        await Nvim.write(e, error=True)
     else:
-        if not ns.shut_up:
-            lo, hi = _HELO.chars
-            chars = choice(range(lo, hi))
-            star = (choice(_HELO.stars),)
-            birds = " ".join(chain(star, sample(_HELO.cocks, k=chars), star))
-            helo = choice(_HELO.helo)
-            msg = f"{birds}  {helo}{linesep}"
-            encoded = encode(msg)
-            stdout.buffer.write(encoded)
-            stdout.buffer.flush()
+        if stack.settings.display.statusline.helo:
+            if not ns.shut_up:
+                lo, hi = _HELO.chars
+                chars = choice(range(lo, hi))
+                star = (choice(_HELO.stars),)
+                birds = " ".join(chain(star, sample(_HELO.cocks, k=chars), star))
+                helo = choice(_HELO.helo)
+                msg = f"{birds}  {helo}{linesep}"
+                encoded = encode(msg)
+                stdout.buffer.write(encoded)
+                stdout.buffer.flush()

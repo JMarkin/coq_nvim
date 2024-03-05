@@ -1,20 +1,59 @@
-from contextlib import suppress
+from dataclasses import dataclass
 from os import linesep
 from pathlib import PurePath
-from typing import AsyncIterator, Iterator, Mapping
+from typing import AsyncIterator, Iterator, Mapping, Optional, Sequence, Tuple
 
-from pynvim.api.buffer import Buffer
-from pynvim.api.common import NvimError
-from pynvim_pp.api import buf_line_count, list_bufs
-from pynvim_pp.lib import async_call, go
-from pynvim_pp.logging import with_suppress
+from pynvim_pp.buffer import Buffer
+from pynvim_pp.logging import suppress_and_log
+from pynvim_pp.rpc_types import NvimError
+from pynvim_pp.window import Window
 
-from ...databases.buffers.database import BDB, BufferWord
 from ...paths.show import fmt_path
+from ...shared.executor import AsyncExecutor
 from ...shared.runtime import Supervisor
 from ...shared.runtime import Worker as BaseWorker
 from ...shared.settings import BuffersClient
 from ...shared.types import Completion, Context, Doc, Edit
+from .db.database import BDB, BufferWord, Update
+
+
+@dataclass(frozen=True)
+class _Info:
+    buf_id: int
+    filetype: str
+    filename: str
+    range: Tuple[int, int]
+    lines: Sequence[str]
+    buffers: Mapping[Buffer, int]
+
+
+async def _info() -> Optional[_Info]:
+    try:
+        win = await Window.get_current()
+        height = await win.get_height()
+        buf = await win.get_buf()
+        bufs = await Buffer.list(listed=True)
+        buffers = {buf: await buf.line_count() for buf in bufs}
+        if (current_lines := buffers.get(buf)) is None:
+            return None
+        else:
+            row, _ = await win.get_cursor()
+            lo = max(0, row - height)
+            hi = min(current_lines, row + height + 1)
+            lines = await buf.get_lines(lo=lo, hi=hi)
+            filetype = await buf.filetype()
+            filename = (await buf.get_name()) or ""
+            info = _Info(
+                buf_id=buf.number,
+                filetype=filetype,
+                filename=filename,
+                range=(lo, hi),
+                lines=lines,
+                buffers=buffers,
+            )
+            return info
+    except NvimError:
+        return None
 
 
 def _doc(client: BuffersClient, context: Context, word: BufferWord) -> Doc:
@@ -31,49 +70,101 @@ def _doc(client: BuffersClient, context: Context, word: BufferWord) -> Doc:
     return Doc(text=linesep.join(cont()), syntax="")
 
 
-class Worker(BaseWorker[BuffersClient, BDB]):
+class Worker(BaseWorker[BuffersClient, None]):
     def __init__(
-        self, supervisor: Supervisor, options: BuffersClient, misc: BDB
+        self,
+        ex: AsyncExecutor,
+        supervisor: Supervisor,
+        options: BuffersClient,
+        misc: None,
     ) -> None:
-        super().__init__(supervisor, options=options, misc=misc)
-        go(supervisor.nvim, aw=self._poll())
+        self._db = BDB(
+            supervisor.limits.tokenization_limit,
+            unifying_chars=supervisor.match.unifying_chars,
+            include_syms=options.match_syms,
+        )
+        super().__init__(ex, supervisor=supervisor, options=options, misc=misc)
+        self._ex.run(self._poll())
+
+    def interrupt(self) -> None:
+        with self._interrupt():
+            self._db.interrupt()
 
     async def _poll(self) -> None:
-        def c1() -> Mapping[Buffer, int]:
-            bufs = {
-                buf: buf_line_count(self._supervisor.nvim, buf=buf)
-                for buf in list_bufs(self._supervisor.nvim, listed=True)
-            }
-            return bufs
-
         while True:
-            with with_suppress():
-                with suppress(NvimError):
-                    bufs = await async_call(self._supervisor.nvim, c1)
-                    dead = await self._misc.vacuum(
-                        {buf.number: rows for buf, rows in bufs.items()}
-                    )
 
-                    def c2() -> None:
-                        buffers = {buf.number: buf for buf in bufs}
-                        for buf_id in dead:
-                            if buf := buffers.get(buf_id):
-                                with suppress(NvimError):
-                                    self._supervisor.nvim.api.buf_detach(buf)
+            async def cont() -> None:
+                with suppress_and_log():
+                    if info := await _info():
+                        lo, hi = info.range
+                        buf_line_counts = {
+                            int(buf.number): line_count
+                            for buf, line_count in info.buffers.items()
+                        }
+                        self._db.vacuum(buf_line_counts)
+                        self._db.set_lines(
+                            info.buf_id,
+                            filetype=info.filetype,
+                            filename=info.filename,
+                            lo=lo,
+                            hi=hi,
+                            lines=info.lines,
+                        )
 
-                    await async_call(self._supervisor.nvim, c2)
-                async with self._supervisor.idling:
-                    await self._supervisor.idling.wait()
+            await self._with_interrupt(cont())
+            async with self._idle:
+                await self._idle.wait()
 
-    async def work(self, context: Context) -> AsyncIterator[Completion]:
+    async def buf_update(self, buf_id: int, filetype: str, filename: str) -> None:
+        async def cont() -> None:
+            with self._interrupt_lock:
+                self._db.buf_update(buf_id, filetype=filetype, filename=filename)
+
+        await self._ex.submit(cont())
+
+    async def set_lines(
+        self,
+        buf_id: int,
+        filetype: str,
+        filename: str,
+        lo: int,
+        hi: int,
+        lines: Sequence[str],
+    ) -> None:
+        async def cont() -> None:
+            self._db.set_lines(
+                buf_id,
+                filetype=filetype,
+                filename=filename,
+                lo=lo,
+                hi=hi,
+                lines=lines,
+            )
+
+        await self._ex.submit(cont())
+
+    async def _work(self, context: Context) -> AsyncIterator[Completion]:
         async with self._work_lock:
             filetype = context.filetype if self._options.same_filetype else None
-            words = await self._misc.words(
+            update = (
+                Update(
+                    buf_id=context.buf_id,
+                    filetype=context.filetype,
+                    filename=context.filename,
+                    lo=change.range.start,
+                    hi=change.range.stop,
+                    lines=change.lines,
+                )
+                if (change := context.change)
+                else None
+            )
+            words = self._db.words(
                 self._supervisor.match,
                 filetype=filetype,
                 word=context.words,
                 sym=context.syms if self._options.match_syms else "",
                 limitless=context.manual,
+                update=update,
             )
             for word in words:
                 edit = Edit(new_text=word.text)

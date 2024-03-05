@@ -1,7 +1,8 @@
+.ccls-cache/
 /.vars/
 /.venv/
-/temp/
-__pycache__/
 /.vscode/
+/temp/
 /test/
 .venv
+__pycache__/

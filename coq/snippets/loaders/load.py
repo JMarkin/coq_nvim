@@ -1,14 +1,15 @@
 from dataclasses import asdict
 from os.path import normcase
 from pathlib import Path
-from typing import AbstractSet, Iterable, Iterator, MutableMapping, MutableSet
+from typing import AbstractSet, Callable, Iterable, Iterator, MutableMapping, MutableSet
 from uuid import UUID, uuid3
 
 from pynvim_pp.logging import log
 from std2.graphlib import recur_sort
 from std2.pathlib import walk
 
-from ..types import LoadedSnips, LoadError, ParsedSnippet, SnippetGrammar
+from ...shared.types import UTF8, SnippetGrammar
+from ..types import LoadedSnips, LoadError, ParsedSnippet
 from .lsp import load_lsp
 from .neosnippet import load_neosnippet
 from .ultisnip import load_ultisnip
@@ -27,6 +28,7 @@ def _key(snip: ParsedSnippet) -> UUID:
 
 
 def load_direct(
+    trans: Callable[[ParsedSnippet], ParsedSnippet],
     ignore_error: bool,
     lsp: Iterable[Path],
     neosnippet: Iterable[Path],
@@ -46,7 +48,7 @@ def load_direct(
 
     for parser, (grammar, paths) in specs.items():
         for path in paths:
-            with path.open(encoding="UTF-8") as fd:
+            with path.open(encoding=UTF8) as fd:
                 try:
                     filetype, exts, snips = parser(
                         grammar, path=path, lines=enumerate(fd, start=1)
@@ -60,7 +62,7 @@ def load_direct(
                     ext_acc = extensions.setdefault(filetype, set())
                     for ext in exts:
                         ext_acc.add(ext)
-                    for snip in snips:
+                    for snip in map(trans, snips):
                         uid = _key(snip)
                         snippets[uid] = snip
 
@@ -69,11 +71,13 @@ def load_direct(
 
 
 def load_ci(
+    trans: Callable[[ParsedSnippet], ParsedSnippet],
     lsp: Iterable[Path],
     neosnippet: Iterable[Path],
     ultisnip: Iterable[Path],
 ) -> LoadedSnips:
     loaded = load_direct(
+        trans,
         True,
         lsp=_load_paths(lsp, exts={".json"}),
         neosnippet=_load_paths(neosnippet, exts={".snippets", ".snip"}),
